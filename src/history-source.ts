@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
+
+/** Pi's documented environment override for the session directory. */
+const SESSION_DIR_ENV = "PI_CODING_AGENT_SESSION_DIR";
 
 /** One unique user-typed prompt with the time and working directory of its most recent use. */
 export interface HistoryRecord {
@@ -15,8 +19,32 @@ export interface HistoryRecord {
 export interface SessionContext {
 	/** Pi's current working directory. */
 	cwd: string;
-	/** Directory holding the current session's files; empty for an ephemeral session. */
-	sessionDir: string;
+	/** Directory Pi stores this directory's sessions in; undefined means Pi's default layout. */
+	sessionDir: string | undefined;
+}
+
+/**
+ * Where the sessions for `ctx.cwd` live. A persisted session reports its own directory. An
+ * ephemeral (`--no-session`) session reports none, so fall back to the custom directory configured
+ * through Pi's documented environment variable or `sessionDir` setting, in Pi's precedence order.
+ * A `--session-dir` flag given together with `--no-session` is not visible to extensions.
+ */
+export function sessionContextOf(
+	ctx: Pick<ExtensionContext, "cwd" | "sessionManager">,
+	settingsSessionDir: string | undefined,
+): SessionContext {
+	const configured = process.env[SESSION_DIR_ENV] || settingsSessionDir;
+	return {
+		cwd: ctx.cwd,
+		sessionDir: ctx.sessionManager.getSessionDir() || (configured ? resolveUserPath(configured, ctx.cwd) : undefined),
+	};
+}
+
+/** Resolve a user-configured path the way Pi does: `~` expands to home, relative to `cwd`. */
+function resolveUserPath(path: string, cwd: string): string {
+	if (path === "~") return homedir();
+	if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+	return resolve(cwd, path);
 }
 
 export interface HistorySource {
@@ -33,7 +61,7 @@ export function createHistorySource(): HistorySource {
 	return {
 		async load(context, signal) {
 			const cwd = resolve(context.cwd);
-			const sessions = await SessionManager.list(cwd, context.sessionDir || undefined, undefined, signal);
+			const sessions = await SessionManager.list(cwd, context.sessionDir, undefined, signal);
 			const occurrences: HistoryRecord[] = [];
 			for (const session of sessions) {
 				signal?.throwIfAborted();

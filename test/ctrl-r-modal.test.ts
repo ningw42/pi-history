@@ -1,19 +1,39 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { Keys, useHarness } from "./harness.ts";
+import { type Harness, Keys, useHarness } from "./harness.ts";
 
 const T0 = Date.UTC(2026, 10, 1, 9, 0, 0);
-const minutes = (n: number) => T0 + n * 60_000;
+/** The timestamp `n` minutes after T0. */
+const minutesAfterT0 = (n: number) => T0 + n * 60_000;
+
+/** The rendered overlay shows the history modal. */
+function assertModalShown(h: Harness): void {
+	assert.match(h.overlayLines()[0] ?? "", /History/);
+}
+
+/** No overlay is rendered. */
+function assertNoModal(h: Harness): void {
+	assert.deepEqual(h.overlayLines(), []);
+}
+
+/** One session in the current directory with prompts "one", "two", "three", oldest first. */
+function writeThreePrompts(h: Harness): void {
+	h.writeSession({
+		cwd: h.cwd,
+		prompts: ["one", "two", "three"].map((text, i) => ({ text, timestamp: minutesAfterT0(i + 1) })),
+	});
+}
 
 describe("Ctrl+R opens the history modal", () => {
 	test("opens on an empty input bar", async (t) => {
 		const h = useHarness(t);
 		await h.start();
 		h.press(Keys.ctrlR);
-		assert.equal(h.modalOpen, true);
+		await h.flush();
+		assertModalShown(h);
 	});
 
 	test("opens with the cursor in the middle of a multi-line draft", async (t) => {
@@ -24,7 +44,8 @@ describe("Ctrl+R opens the history modal", () => {
 		h.type("second line");
 		h.press(Keys.up, Keys.left, Keys.left);
 		h.press(Keys.ctrlR);
-		assert.equal(h.modalOpen, true);
+		await h.flush();
+		assertModalShown(h);
 	});
 
 	test("takes precedence over an editor binding on the same key", async (t) => {
@@ -33,7 +54,8 @@ describe("Ctrl+R opens the history modal", () => {
 		h.type("draft");
 
 		h.press(Keys.ctrlR);
-		assert.equal(h.modalOpen, true);
+		await h.flush();
+		assertModalShown(h);
 		h.press(Keys.escape);
 		await h.flush();
 
@@ -42,9 +64,10 @@ describe("Ctrl+R opens the history modal", () => {
 
 	test("shows a loading state before records arrive, then the records", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "hello", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "hello", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 		h.press(Keys.ctrlR);
+		await h.flush();
 		assert.deepEqual(h.modalBody(), ["Loading history…"]);
 		await h.loaded();
 		assert.deepEqual(h.modalBody(), ["› hello"]);
@@ -65,13 +88,13 @@ describe("history records", () => {
 		h.writeSession({
 			cwd: h.cwd,
 			prompts: [
-				{ text: "oldest", timestamp: minutes(1) },
-				{ text: "middle", timestamp: minutes(2) },
+				{ text: "oldest", timestamp: minutesAfterT0(1) },
+				{ text: "middle", timestamp: minutesAfterT0(2) },
 			],
 		});
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "newest", timestamp: minutes(3) }] });
-		h.writeSession({ cwd: h.path("work/other"), prompts: [{ text: "other project", timestamp: minutes(4) }] });
-		h.writeSession({ cwd: join(h.cwd, "sub"), prompts: [{ text: "subdirectory", timestamp: minutes(5) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "newest", timestamp: minutesAfterT0(3) }] });
+		h.writeSession({ cwd: h.path("work/other"), prompts: [{ text: "other project", timestamp: minutesAfterT0(4) }] });
+		h.writeSession({ cwd: join(h.cwd, "sub"), prompts: [{ text: "subdirectory", timestamp: minutesAfterT0(5) }] });
 		await h.start();
 
 		h.press(Keys.ctrlR);
@@ -86,9 +109,9 @@ describe("history records", () => {
 		h.writeSession({
 			cwd: h.path("work-project"),
 			dir: h.sessionDir,
-			prompts: [{ text: "colliding directory", timestamp: minutes(2) }],
+			prompts: [{ text: "colliding directory", timestamp: minutesAfterT0(2) }],
 		});
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "this project", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "this project", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 
 		h.press(Keys.ctrlR);
@@ -102,9 +125,9 @@ describe("history records", () => {
 		h.writeSession({
 			cwd: h.cwd,
 			prompts: [
-				{ text: "kept", timestamp: minutes(1) },
-				{ text: "", timestamp: minutes(2) },
-				{ text: "  \n\t ", timestamp: minutes(3) },
+				{ text: "kept", timestamp: minutesAfterT0(1) },
+				{ text: "", timestamp: minutesAfterT0(2) },
+				{ text: "  \n\t ", timestamp: minutesAfterT0(3) },
 			],
 		});
 		await h.start();
@@ -117,7 +140,7 @@ describe("history records", () => {
 
 	test("keep their text untrimmed", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "   indented prompt", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "   indented prompt", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 
 		h.press(Keys.ctrlR);
@@ -133,11 +156,11 @@ describe("history records", () => {
 		h.writeSession({
 			cwd: h.cwd,
 			prompts: [
-				{ text: "repeated", timestamp: minutes(1) },
-				{ text: "between", timestamp: minutes(2) },
+				{ text: "repeated", timestamp: minutesAfterT0(1) },
+				{ text: "between", timestamp: minutesAfterT0(2) },
 			],
 		});
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "repeated", timestamp: minutes(3) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "repeated", timestamp: minutesAfterT0(3) }] });
 		await h.start();
 
 		h.press(Keys.ctrlR);
@@ -148,8 +171,8 @@ describe("history records", () => {
 
 	test("come from a custom session directory when Pi uses one", async (t) => {
 		const h = useHarness(t, { customSessionDir: "custom-sessions" });
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "from custom dir", timestamp: minutes(1) }] });
-		h.writeSession({ cwd: h.path("work/other"), prompts: [{ text: "other project", timestamp: minutes(2) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "from custom dir", timestamp: minutesAfterT0(1) }] });
+		h.writeSession({ cwd: h.path("work/other"), prompts: [{ text: "other project", timestamp: minutesAfterT0(2) }] });
 		await h.start();
 
 		h.press(Keys.ctrlR);
@@ -158,9 +181,64 @@ describe("history records", () => {
 		assert.deepEqual(h.modalBody(), ["› from custom dir"]);
 	});
 
+	test("come from the sessionDir setting in an ephemeral (--no-session) session", async (t) => {
+		// The cwd is <root>/work/project, so this relative setting names <root>/custom-sessions.
+		const h = useHarness(t, {
+			customSessionDir: "custom-sessions",
+			noSession: true,
+			settings: { sessionDir: "../../custom-sessions" },
+		});
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "from custom dir", timestamp: minutesAfterT0(1) }] });
+		await h.start();
+
+		h.press(Keys.ctrlR);
+		await h.loaded();
+
+		assert.deepEqual(h.modalBody(), ["› from custom dir"]);
+	});
+
+	test("come from PI_CODING_AGENT_SESSION_DIR, ahead of the setting, in an ephemeral session", async (t) => {
+		const h = useHarness(t, {
+			customSessionDir: "env-sessions",
+			noSession: true,
+			settings: { sessionDir: "../../settings-sessions" },
+		});
+		h.setEnv("PI_CODING_AGENT_SESSION_DIR", h.sessionDir);
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "from env dir", timestamp: minutesAfterT0(1) }] });
+		h.writeSession({
+			cwd: h.cwd,
+			dir: h.path("settings-sessions"),
+			prompts: [{ text: "from settings dir", timestamp: minutesAfterT0(2) }],
+		});
+		await h.start();
+
+		h.press(Keys.ctrlR);
+		await h.loaded();
+
+		assert.deepEqual(h.modalBody(), ["› from env dir"]);
+	});
+
+	test("still load when neighbouring session files are malformed or unreadable", async (t) => {
+		const h = useHarness(t);
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "valid prompt", timestamp: minutesAfterT0(1) }] });
+		writeFileSync(join(h.sessionDir, "2026-11-01T09-02-00-000Z_garbage.jsonl"), "not json at all\n{{{\n");
+		writeFileSync(
+			join(h.sessionDir, "2026-11-01T09-03-00-000Z_headerless.jsonl"),
+			`${JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: new Date(minutesAfterT0(3)).toISOString(), message: { role: "user", content: "no header", timestamp: minutesAfterT0(3) } })}\n`,
+		);
+		const unreadable = h.writeSession({ cwd: h.cwd, prompts: [{ text: "unreadable", timestamp: minutesAfterT0(4) }] });
+		chmodSync(unreadable, 0);
+		await h.start();
+
+		h.press(Keys.ctrlR);
+		await h.loaded();
+
+		assert.deepEqual(h.modalBody(), ["› valid prompt"]);
+	});
+
 	test("show a multi-line prompt as one row", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "line one\nline two", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "line one\nline two", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 
 		h.press(Keys.ctrlR);
@@ -173,14 +251,7 @@ describe("history records", () => {
 describe("selection", () => {
 	async function openWithThree(t: Parameters<typeof useHarness>[0]) {
 		const h = useHarness(t);
-		h.writeSession({
-			cwd: h.cwd,
-			prompts: [
-				{ text: "one", timestamp: minutes(1) },
-				{ text: "two", timestamp: minutes(2) },
-				{ text: "three", timestamp: minutes(3) },
-			],
-		});
+		writeThreePrompts(h);
 		await h.start();
 		h.press(Keys.ctrlR);
 		await h.loaded();
@@ -212,7 +283,7 @@ describe("selection", () => {
 		const h = useHarness(t, { terminalRows: 13 }); // leaves room for 3 list rows
 		h.writeSession({
 			cwd: h.cwd,
-			prompts: ["p1", "p2", "p3", "p4", "p5"].map((text, i) => ({ text, timestamp: minutes(i) })),
+			prompts: ["p1", "p2", "p3", "p4", "p5"].map((text, i) => ({ text, timestamp: minutesAfterT0(i) })),
 		});
 		await h.start();
 		h.press(Keys.ctrlR);
@@ -233,8 +304,8 @@ describe("confirming", () => {
 		h.writeSession({
 			cwd: h.cwd,
 			prompts: [
-				{ text: "older prompt\nwith two lines", timestamp: minutes(1) },
-				{ text: "newer prompt", timestamp: minutes(2) },
+				{ text: "older prompt\nwith two lines", timestamp: minutesAfterT0(1) },
+				{ text: "newer prompt", timestamp: minutesAfterT0(2) },
 			],
 		});
 		await h.start();
@@ -246,14 +317,14 @@ describe("confirming", () => {
 		h.press(Keys.up, Keys.enter);
 		await h.flush();
 
-		assert.equal(h.modalOpen, false);
+		assertNoModal(h);
 		assert.equal(h.editorText(), "older prompt\nwith two lines");
 		assert.deepEqual(h.editorCursor(), { line: 1, col: "with two lines".length });
 	});
 
 	test("nothing is submitted", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 
 		h.press(Keys.ctrlR);
@@ -273,30 +344,64 @@ describe("confirming", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 		h.press(Keys.enter);
+		await h.flush();
 
-		assert.equal(h.modalOpen, true);
+		assertModalShown(h);
 		h.press(Keys.escape);
+		await h.flush();
 		assert.equal(h.editorText(), "my draft");
 	});
 
 	test("Enter while still loading does nothing", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 		h.type("my draft");
 
 		h.press(Keys.ctrlR, Keys.enter);
+		await h.flush();
 
-		assert.equal(h.modalOpen, true);
+		assertModalShown(h);
 		await h.loaded();
 		assert.equal(h.editorText(), "my draft");
+		assert.deepEqual(h.submissions, []);
+	});
+
+	test("Enter arriving in the same input batch as Ctrl+R does not submit the draft", async (t) => {
+		const h = useHarness(t);
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
+		await h.start();
+		h.type("draft that must not be submitted");
+
+		h.press(Keys.ctrlR, Keys.enter); // one batch, before the overlay is mounted
+		await h.flush();
+
+		assert.deepEqual(h.submissions, []);
+		assert.equal(h.editorText(), "draft that must not be submitted");
+		assertModalShown(h);
+	});
+
+	test("a second Enter in the same input batch as the confirming Enter submits nothing", async (t) => {
+		const h = useHarness(t);
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
+		await h.start();
+		h.type("draft that must not be submitted");
+		h.press(Keys.ctrlR);
+		await h.loaded();
+
+		h.press(Keys.enter, Keys.enter); // one batch: the second Enter reaches the editor before the result is applied
+		await h.flush();
+
+		assert.deepEqual(h.submissions, []);
+		assert.equal(h.editorText(), "recalled");
+		assertNoModal(h);
 	});
 });
 
 describe("dismissing", () => {
 	test("Escape leaves a multi-line draft and a mid-text cursor exactly as they were", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 		h.type("first line");
 		h.press("\n");
@@ -310,13 +415,13 @@ describe("dismissing", () => {
 		h.press(Keys.up, Keys.down, Keys.escape);
 		await h.flush();
 
-		assert.equal(h.modalOpen, false);
+		assertNoModal(h);
 		assert.deepEqual({ text: h.editorText(), cursor: h.editorCursor() }, before);
 	});
 
 	test("Escape leaves a collapsed paste collapsed and its content intact", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 		const pasted = Array.from({ length: 15 }, (_, i) => `pasted line ${i + 1}`).join("\n");
 		h.type("before ");
@@ -335,20 +440,42 @@ describe("dismissing", () => {
 
 	test("Escape while still loading closes the modal", async (t) => {
 		const h = useHarness(t);
-		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutes(1) }] });
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 		h.type("my draft");
 
 		h.press(Keys.ctrlR, Keys.escape);
+		await h.flush();
+		assertNoModal(h);
 
-		assert.equal(h.modalOpen, false);
+		// Loading was cancelled: nothing shows up or changes once it would have finished.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assertNoModal(h);
 		assert.equal(h.editorText(), "my draft");
+		assert.deepEqual(h.submissions, []);
+	});
+
+	test("keys after Escape in the same input batch do not reach the draft", async (t) => {
+		const h = useHarness(t);
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
+		await h.start();
+		h.type("my draft");
+		h.press(Keys.ctrlR);
+		await h.loaded();
+
+		h.press(Keys.escape, Keys.enter, Keys.escape); // one batch
+		await h.flush();
+
+		assertNoModal(h);
+		assert.equal(h.editorText(), "my draft");
+		assert.deepEqual(h.submissions, []);
 	});
 
 	test("the input bar works normally again after the modal closes", async (t) => {
 		const h = useHarness(t);
 		await h.start();
 		h.press(Keys.ctrlR, Keys.escape);
+		await h.flush();
 
 		h.type("typed after");
 
@@ -366,14 +493,7 @@ describe("keybindings", () => {
 				"tui.select.down": "ctrl+j",
 			},
 		});
-		h.writeSession({
-			cwd: h.cwd,
-			prompts: [
-				{ text: "one", timestamp: minutes(1) },
-				{ text: "two", timestamp: minutes(2) },
-				{ text: "three", timestamp: minutes(3) },
-			],
-		});
+		writeThreePrompts(h);
 		await h.start();
 		h.type("draft");
 
@@ -382,7 +502,8 @@ describe("keybindings", () => {
 		h.press("\x0b", "\x0b", "\x0a"); // ctrl+k, ctrl+k, ctrl+j
 		assert.deepEqual(h.modalBody(), ["  one", "› two", "  three"]);
 		h.press(Keys.enter, Keys.escape); // default keys no longer confirm or cancel
-		assert.equal(h.modalOpen, true);
+		await h.flush();
+		assertModalShown(h);
 		h.press("\x0f"); // ctrl+o
 		await h.flush();
 		assert.equal(h.editorText(), "two");
@@ -391,7 +512,7 @@ describe("keybindings", () => {
 		await h.loaded();
 		h.press("\x07"); // ctrl+g
 		await h.flush();
-		assert.equal(h.modalOpen, false);
+		assertNoModal(h);
 		assert.equal(h.editorText(), "two");
 	});
 });
@@ -402,8 +523,8 @@ describe("session files", () => {
 		const file = h.writeSession({
 			cwd: h.cwd,
 			prompts: [
-				{ text: "one", timestamp: minutes(1) },
-				{ text: "two", timestamp: minutes(2) },
+				{ text: "one", timestamp: minutesAfterT0(1) },
+				{ text: "two", timestamp: minutesAfterT0(2) },
 			],
 		});
 		const before = { content: readFileSync(file, "utf8"), mtimeMs: statSync(file).mtimeMs };
@@ -428,7 +549,7 @@ describe("outside TUI mode", () => {
 	for (const mode of ["print", "json", "rpc"] as const) {
 		test(`registers nothing and installs no editor in ${mode} mode`, async (t) => {
 			const h = useHarness(t, { mode });
-			h.writeSession({ cwd: h.cwd, prompts: [{ text: "hello", timestamp: minutes(1) }] });
+			h.writeSession({ cwd: h.cwd, prompts: [{ text: "hello", timestamp: minutesAfterT0(1) }] });
 
 			await h.start();
 

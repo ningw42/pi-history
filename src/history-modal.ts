@@ -35,7 +35,6 @@ export class HistoryModal implements Component {
 	private selected = 0;
 	/** Index of the lowest list row on screen, so the selection can scroll into view. */
 	private scrollOffset = 0;
-	private closed = false;
 
 	constructor(options: HistoryModalOptions) {
 		this.options = options;
@@ -78,8 +77,8 @@ export class HistoryModal implements Component {
 
 	invalidate(): void {}
 
+	/** Closing aborts loading; the aborted signal also marks the modal closed. */
 	dispose(): void {
-		this.closed = true;
 		this.abort.abort();
 	}
 
@@ -121,7 +120,7 @@ export class HistoryModal implements Component {
 	}
 
 	private setState(state: LoadState): void {
-		if (this.closed) return;
+		if (this.abort.signal.aborted) return;
 		this.state = state;
 		this.selected = 0;
 		this.scrollOffset = 0;
@@ -129,7 +128,7 @@ export class HistoryModal implements Component {
 	}
 
 	private close(result: ModalResult): void {
-		if (this.closed) return;
+		if (this.abort.signal.aborted) return;
 		this.dispose();
 		this.options.done(result);
 	}

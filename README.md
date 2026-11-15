@@ -73,6 +73,9 @@ The matcher adapter (#3), configuration (#4) and skill restoration (#7) are the 
 - **The wrapper composes with an editor factory configured by another extension**, falling back to Pi's `CustomEditor` with the working-status indicator embedded in its border. (Full composition coverage arrives with #9.)
 - **The working directory recorded in each session header is the authority**, not the storage directory name: two directories such as `/a/b` and `/a-b` share one storage directory name.
 - **Text blocks of one user message are joined with no separator**, the way Pi's interactive mode joins them for display and native history.
+- **Keys that arrive while the modal is opening or closing belong to the modal.** Pi mounts the overlay asynchronously and gives focus back to the editor before the result arrives, so keys from the same terminal input batch (for example a fast Ctrl+R then Enter, or a double Enter) would otherwise reach the editor and submit the draft the modal is replacing.
+- **The session directory** is the current session's. An ephemeral (`--no-session`) session has none, so `PI_CODING_AGENT_SESSION_DIR` and then the `sessionDir` setting are used, in Pi's order. A `--session-dir` flag combined with `--no-session` is not visible to extensions, so that case uses Pi's default directory.
+- **Recalled text goes through Pi's editor**, which stores CRLF/CR as LF and tabs as four spaces, as it does for typed and pasted text. Text typed, pasted or edited in Pi's input bar never contains those characters, so only text stored without passing through the editor is affected: RPC and SDK prompts, extension input transforms, and expanded prompt templates or skills.
 
 ## Development
 
@@ -82,4 +85,8 @@ npm run typecheck   # tsc, no emit
 npm test            # extension-boundary suite (node:test, Node's built-in TypeScript support)
 ```
 
-The tests load the real entry point against a fake Pi API and UI context, with Pi's real editor component (Pi's text-input component joins it with the query line in #3). History comes from synthetic session files in a temporary agent directory (`PI_CODING_AGENT_DIR`), so no real prompt history is read. Tests assert only on what a user can observe: the input bar's text and cursor, and the modal's rendered lines. The harness (`test/harness.ts`) can also put a scripted stub matcher on `PATH` as `fzf` and `sk`, ready for #3 and #4.
+The tests load the real entry point against a fake Pi API and UI context, with Pi's real editor component (Pi's text-input component joins it with the query line in #3). The fake mirrors Pi's overlay lifecycle: the overlay is mounted asynchronously, and closing it gives focus back to the editor before the result arrives. History comes from synthetic session files in a temporary agent directory (`PI_CODING_AGENT_DIR`), so no real prompt history is read.
+
+Tests assert on what a user sees: the input bar's text and cursor, and the rendered overlay lines. The one allowed exception is a narrow set of safety checks at the extension's boundary with Pi, for behaviour that has no visible output: prompts handed to Pi for submission ("nothing is submitted"), what the extension registered or installed with Pi ("registers nothing outside TUI mode"), and the session files on disk ("never written"). Tests never assert on the extension's private state.
+
+The harness (`test/harness.ts`) can also put a scripted stub matcher on `PATH` as `fzf` and `sk`, ready for #3 and #4.

@@ -2,11 +2,19 @@
  * Extension-boundary test harness.
  *
  * Loads the real extension entry point against a fake Pi API and UI context, with Pi's real
- * editor and text-input components. History comes from synthetic session files in a temporary
- * agent directory; no real prompt history is ever read. Tests drive keys and assert only on the
- * input bar's text/cursor and the modal's rendered lines.
+ * editor component. History comes from synthetic session files in a temporary agent directory;
+ * no real prompt history is ever read. The fake mirrors Pi's overlay lifecycle: the overlay is
+ * mounted and focused asynchronously, and closing it gives focus back to the editor before the
+ * result promise settles.
+ *
+ * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
+ * rendered overlay lines (`overlayLines()`, empty when no overlay is shown). The one allowed
+ * exception is a narrow set of safety checks at the extension's boundary with Pi, for behaviour
+ * that has no visible output: prompts handed to Pi for submission (`submissions`), what the
+ * extension registered or installed (`registrations`, `editorFactoryInstalls`, `overlayRequests`,
+ * `notifications`), and the session files on disk. Never assert on the extension's private state.
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,6 +78,12 @@ export interface HarnessOptions {
 	cwd?: string;
 	/** Use a custom session directory, relative to the harness root, instead of Pi's default layout. */
 	customSessionDir?: string;
+	/** Run as an ephemeral (`--no-session`) session: the session manager reports no directory. */
+	noSession?: boolean;
+	/** Effective Pi settings returned by `pi.getSettings()`. */
+	settings?: Record<string, unknown>;
+	/** Environment variables set for the test's duration. */
+	env?: Record<string, string>;
 	/** User keybinding overrides, as in Pi's keybindings.json. */
 	keybindings?: KeybindingsConfig;
 	terminalRows?: number;
@@ -124,6 +138,7 @@ export class Harness {
 		this.matcherLog = join(this.root, "matcher-log.jsonl");
 		this.setEnv("PI_CODING_AGENT_DIR", this.agentDir);
 		if (options.stubMatcher) this.installStubMatcher(options.stubMatcher);
+		for (const [key, value] of Object.entries(options.env ?? {})) this.setEnv(key, value);
 
 		initTheme("dark", false);
 		this.keybindings = new KeybindingsManager(TUI_KEYBINDINGS, options.keybindings ?? {});
@@ -195,16 +210,16 @@ export class Harness {
 		return this.editorComponent;
 	}
 
-	get modalOpen(): boolean {
-		return this.overlay !== undefined;
-	}
-
 	/** Type text into whatever has focus. */
 	type(text: string): void {
 		for (const ch of text) this.press(ch);
 	}
 
-	/** Send raw key sequences to whatever has focus: the modal if open, else the input bar. */
+	/**
+	 * Send raw key sequences, each to whatever has focus at that moment: the overlay once mounted,
+	 * else the input bar. Keys passed in one call model one terminal input batch: no promise
+	 * callbacks (such as the overlay mount) run between them.
+	 */
 	press(...keys: string[]): void {
 		for (const key of keys) (this.overlay?.component ?? this.editor).handleInput?.(key);
 	}
@@ -218,15 +233,14 @@ export class Harness {
 		return editor.getCursor();
 	}
 
-	/** The open modal's rendered lines, ANSI-stripped and right-trimmed. */
-	modalLines(width = 80): string[] {
-		if (!this.overlay) throw new Error("modal is not open");
-		return this.overlay.component.render(width).map((line) => stripAnsi(line).trimEnd());
+	/** The overlay as rendered on screen, ANSI-stripped and right-trimmed; empty when none is shown. */
+	overlayLines(width = 80): string[] {
+		return this.overlay?.component.render(width).map((line) => stripAnsi(line).trimEnd()) ?? [];
 	}
 
-	/** Rendered list rows: lines inside the frame, without frame characters. */
+	/** Rendered rows inside the overlay's frame, without frame characters. */
 	modalBody(width = 80): string[] {
-		return this.modalLines(width)
+		return this.overlayLines(width)
 			.slice(1, -1)
 			.map((line) => line.replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd());
 	}
@@ -245,9 +259,12 @@ export class Harness {
 		}
 	}
 
-	/** Wait until the open modal has finished loading. */
+	/** Wait until an overlay is shown and has finished loading. */
 	async loaded(): Promise<void> {
-		await this.waitFor(() => !this.modalLines().some((line) => line.includes("Loading")), "history to load");
+		await this.waitFor(() => {
+			const lines = this.overlayLines();
+			return lines.length > 0 && !lines.some((line) => line.includes("Loading"));
+		}, "history to load");
 	}
 
 	matcherCalls(): StubMatcherCall[] {
@@ -268,7 +285,8 @@ export class Harness {
 		rmSync(this.root, { recursive: true, force: true });
 	}
 
-	private setEnv(key: string, value: string): void {
+	/** Set an environment variable for the test's duration. */
+	setEnv(key: string, value: string): void {
 		if (!this.savedEnv.has(key)) this.savedEnv.set(key, process.env[key]);
 		process.env[key] = value;
 	}
@@ -276,7 +294,6 @@ export class Harness {
 	private installStubMatcher(stub: { responses?: StubMatcherResponse[] }): void {
 		const bin = join(this.root, "bin");
 		mkdirSync(bin, { recursive: true });
-		chmodSync(STUB_MATCHER, 0o755);
 		for (const name of ["fzf", "sk"]) symlinkSync(STUB_MATCHER, join(bin, name));
 		const config = join(this.root, "matcher-config.json");
 		writeFileSync(config, JSON.stringify({ responses: stub.responses ?? [] }));
@@ -288,8 +305,10 @@ export class Harness {
 	private fakePi(): ExtensionAPI {
 		const handlers = this.handlers;
 		const registrations = this.registrations;
+		const settings = this.options.settings ?? {};
 		return new Proxy({} as ExtensionAPI, {
 			get(_target, property) {
+				if (property === "getSettings") return () => structuredClone(settings);
 				if (property === "on") {
 					return (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
 						handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -306,6 +325,7 @@ export class Harness {
 	private fakeContext(): ExtensionContext {
 		const mode = this.options.mode ?? "tui";
 		const sessionDir = this.sessionDir;
+		const noSession = this.options.noSession ?? false;
 		const cwd = this.cwd;
 		const ui = {
 			notify: (message: string, type?: string) => this.notifications.push({ message, type }),
@@ -333,16 +353,24 @@ export class Harness {
 				options?: unknown,
 			): Promise<T> =>
 				new Promise<T>((resolve) => {
+					// Mirrors Pi's showExtensionCustom: the factory runs synchronously, the overlay is
+					// mounted (and focused) a microtask later, and done() removes it and restores the
+					// editor's focus synchronously before the returned promise settles.
+					let closed = false;
 					let request: OverlayRequest | undefined;
 					const done = (result: T) => {
-						if (this.overlay === request) this.overlay = undefined;
+						if (closed) return;
+						closed = true;
+						if (request && this.overlay === request) this.overlay = undefined;
 						request?.component.dispose?.();
 						resolve(result);
 					};
 					const component = factory(this.tui, this.theme, this.keybindings, done);
 					request = { component, options };
 					this.overlayRequests.push(request);
-					this.overlay = request;
+					void Promise.resolve().then(() => {
+						if (!closed) this.overlay = request;
+					});
 				}),
 			setEditorText: () => {
 				throw new Error("the extension must not write editor text through ctx.ui.setEditorText");
@@ -355,7 +383,7 @@ export class Harness {
 			ui,
 			sessionManager: {
 				getCwd: () => cwd,
-				getSessionDir: () => sessionDir,
+				getSessionDir: () => (noSession ? "" : sessionDir),
 			},
 		} as unknown as ExtensionContext;
 	}
@@ -396,4 +424,3 @@ export function useHarness(t: { after(fn: () => void): void }, options?: Harness
 	t.after(() => harness.dispose());
 	return harness;
 }
-

@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { installEditorIntegration } from "./editor-integration.ts";
-import { createHistorySource } from "./history-source.ts";
+import { createHistorySource, sessionContextOf } from "./history-source.ts";
 
 const DEFAULT_SEARCH_KEY = "ctrl+r";
 
@@ -14,6 +14,10 @@ export default function piHistory(pi: ExtensionAPI): void {
 	const historySource = createHistorySource();
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		installEditorIntegration(ctx, { historySource, searchKey: DEFAULT_SEARCH_KEY });
+		installEditorIntegration(ctx, {
+			historySource,
+			sessionContext: () => sessionContextOf(ctx, pi.getSettings().sessionDir),
+			searchKey: DEFAULT_SEARCH_KEY,
+		});
 	});
 }
