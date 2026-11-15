@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { type Harness, Keys, useHarness } from "./harness.ts";
+import { Harness, Keys, useHarness } from "./harness.ts";
 
 const T0 = Date.UTC(2026, 10, 1, 9, 0, 0);
 /** The timestamp `n` minutes after T0. */
@@ -322,6 +323,28 @@ describe("confirming", () => {
 		assert.deepEqual(h.editorCursor(), { line: 1, col: "with two lines".length });
 	});
 
+	test("a stored record with tabs and CR/CRLF line endings is recalled the way Pi's editor stores text", async (t) => {
+		// Approved contract: Pi's editor turns CRLF and CR into LF and a tab into four spaces.
+		const h = useHarness(t);
+		const file = h.writeSession({
+			cwd: h.cwd,
+			prompts: [{ text: "first\tcolumn\r\nsecond\tcolumn\rthird", timestamp: minutesAfterT0(1) }],
+		});
+		const stored = readFileSync(file, "utf8");
+		await h.start();
+		h.type("draft");
+
+		h.press(Keys.ctrlR);
+		await h.loaded();
+		h.press(Keys.enter);
+		await h.flush();
+
+		assert.equal(h.editorText(), "first    column\nsecond    column\nthird");
+		assert.deepEqual(h.editorCursor(), { line: 2, col: "third".length });
+		assert.deepEqual(h.submissions, []);
+		assert.equal(readFileSync(file, "utf8"), stored);
+	});
+
 	test("nothing is submitted", async (t) => {
 		const h = useHarness(t);
 		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
@@ -562,6 +585,33 @@ describe("outside TUI mode", () => {
 });
 
 describe("test harness", () => {
+	test("ignores a PI_CODING_AGENT_SESSION_DIR inherited from the host and restores it afterwards", async () => {
+		const sentinel = mkdtempSync(join(tmpdir(), "pi-history-sentinel-"));
+		const previous = process.env.PI_CODING_AGENT_SESSION_DIR;
+		process.env.PI_CODING_AGENT_SESSION_DIR = sentinel;
+		const h = new Harness({
+			customSessionDir: "custom-sessions",
+			noSession: true,
+			settings: { sessionDir: "../../custom-sessions" },
+		});
+		try {
+			h.writeSession({ cwd: h.cwd, prompts: [{ text: "from custom dir", timestamp: minutesAfterT0(1) }] });
+			h.writeSession({ cwd: h.cwd, dir: sentinel, prompts: [{ text: "from the host", timestamp: minutesAfterT0(2) }] });
+			await h.start();
+
+			h.press(Keys.ctrlR);
+			await h.loaded();
+
+			assert.deepEqual(h.modalBody(), ["› from custom dir"]);
+		} finally {
+			h.dispose();
+			assert.equal(process.env.PI_CODING_AGENT_SESSION_DIR, sentinel);
+			if (previous === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+			else process.env.PI_CODING_AGENT_SESSION_DIR = previous;
+			rmSync(sentinel, { recursive: true, force: true });
+		}
+	});
+
 	test("can put a scripted stub matcher on PATH that records its invocations", async (t) => {
 		const h = useHarness(t, { stubMatcher: { responses: [{ query: "q", output: ["b"], exitCode: 0 }] } });
 

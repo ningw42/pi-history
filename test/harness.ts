@@ -82,8 +82,6 @@ export interface HarnessOptions {
 	noSession?: boolean;
 	/** Effective Pi settings returned by `pi.getSettings()`. */
 	settings?: Record<string, unknown>;
-	/** Environment variables set for the test's duration. */
-	env?: Record<string, string>;
 	/** User keybinding overrides, as in Pi's keybindings.json. */
 	keybindings?: KeybindingsConfig;
 	terminalRows?: number;
@@ -137,8 +135,10 @@ export class Harness {
 			: defaultSessionDir(this.agentDir, this.cwd);
 		this.matcherLog = join(this.root, "matcher-log.jsonl");
 		this.setEnv("PI_CODING_AGENT_DIR", this.agentDir);
+		// Pi's session-directory override must not leak in from the host: it would point the
+		// extension at real history. Tests that need it set it explicitly with setEnv().
+		this.setEnv("PI_CODING_AGENT_SESSION_DIR", undefined);
 		if (options.stubMatcher) this.installStubMatcher(options.stubMatcher);
-		for (const [key, value] of Object.entries(options.env ?? {})) this.setEnv(key, value);
 
 		initTheme("dark", false);
 		this.keybindings = new KeybindingsManager(TUI_KEYBINDINGS, options.keybindings ?? {});
@@ -285,10 +285,11 @@ export class Harness {
 		rmSync(this.root, { recursive: true, force: true });
 	}
 
-	/** Set an environment variable for the test's duration. */
-	setEnv(key: string, value: string): void {
+	/** Set (or, with undefined, unset) an environment variable for the test's duration. */
+	setEnv(key: string, value: string | undefined): void {
 		if (!this.savedEnv.has(key)) this.savedEnv.set(key, process.env[key]);
-		process.env[key] = value;
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
 	}
 
 	private installStubMatcher(stub: { responses?: StubMatcherResponse[] }): void {
