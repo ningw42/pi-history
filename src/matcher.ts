@@ -19,21 +19,43 @@ export interface Matcher {
 	): Promise<MatchOutcome<R>>;
 }
 
-/** Inherited default options would change ranking or output format; they never reach the matcher. */
-const DEFAULT_OPTION_VARIABLES = ["FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE"];
-/** fzf's exit status when nothing matched; not an error. */
+/** The supported matcher programs. */
+export const MATCHER_NAMES = ["fzf", "sk"] as const;
+export type MatcherName = (typeof MATCHER_NAMES)[number];
+
+export interface MatcherSettings {
+	name: MatcherName;
+	/** Executable to start: a name looked up on PATH, or a path. Default: the matcher's name. */
+	command?: string;
+}
+
+/**
+ * Inherited default options of either program would change ranking or output format; they never
+ * reach the matcher.
+ */
+const DEFAULT_OPTION_VARIABLES = ["FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE", "SKIM_DEFAULT_OPTIONS", "SKIM_OPTIONS_FILE"];
+/** The exit status of both fzf and sk when nothing matched; not an error. */
 const NO_MATCH_STATUS = 1;
 /** Enough standard error to explain a failure. */
 const STDERR_LIMIT = 4096;
 
 /**
- * fzf in non-interactive filter mode. The history scheme ranks by match quality and breaks ties by
- * input order, which is newest first; sorting is left enabled.
+ * Filter-mode arguments that rank by match quality first and by input order, which is newest
+ * first, as the tiebreak; sorting is left enabled.
+ * - fzf: the history scheme.
+ * - sk: tiebreak on score, then index. Never skim's history scheme: it ranks input order ahead of
+ *   match quality.
  */
-export function createFzfMatcher(): Matcher {
+const FILTER_ARGUMENTS: Record<MatcherName, (query: string) => string[]> = {
+	fzf: (query) => ["--filter", query, "--read0", "--print0", "--scheme=history"],
+	sk: (query) => ["--filter", query, "--read0", "--print0", "--tiebreak=score,index"],
+};
+
+/** fzf or sk in non-interactive filter mode. */
+export function createMatcher({ name, command = name }: MatcherSettings): Matcher {
+	const filterArguments = FILTER_ARGUMENTS[name];
 	return {
-		match: (query, records, signal) =>
-			runFilter("fzf", ["--filter", query, "--read0", "--print0", "--scheme=history"], records, signal),
+		match: (query, records, signal) => runFilter(command, filterArguments(query), records, signal),
 	};
 }
 

@@ -28,6 +28,7 @@
               pkgs.nodejs_26
               pkgs.git
               pkgs.fzf
+              pkgs.skim
             ];
             text = "npm run check";
           };
@@ -58,6 +59,7 @@
               pkgs.nodejs_26
               pkgs.git
               pkgs.fzf
+              pkgs.skim
             ]
             ++ devHooks.enabledPackages;
             shellHook = devHooks.shellHook + ''

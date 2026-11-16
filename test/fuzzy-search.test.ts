@@ -2,24 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { type HarnessOptions, Keys, minutesAfterT0, type StubMatcherCall, useHarness } from "./harness.ts";
+import { harnessWithPrompts, Keys, needsStub, type StubMatcherCall, windowsSkip } from "./harness.ts";
 
 /** Long enough for a debounced matcher run to have started, were one going to. */
 const SETTLE_MS = 300;
 const settle = () => new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-
-const windowsSkip = (reason: string) => ({ skip: process.platform === "win32" ? reason : false });
-/** Node refuses to start the stub's `.cmd` launcher without a shell, and the matcher never uses one. */
-const needsStub = windowsSkip("the stub matcher cannot be started without a shell on Windows");
-
-type TestContext = Parameters<typeof useHarness>[0];
-
-/** A harness with one session in the current directory holding `prompts`, oldest first. */
-function harnessWithPrompts(t: TestContext, prompts: string[], options: HarnessOptions = {}) {
-	const h = useHarness(t, options);
-	h.writeSession({ cwd: h.cwd, prompts: prompts.map((text, i) => ({ text, timestamp: minutesAfterT0(i + 1) })) });
-	return h;
-}
 
 /** The query a matcher invocation was given. */
 function queryOf(call: StubMatcherCall): string | undefined {
