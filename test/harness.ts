@@ -16,7 +16,7 @@
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	type ExtensionAPI,
@@ -293,12 +293,19 @@ export class Harness {
 	}
 
 	private installStubMatcher(stub: { responses?: StubMatcherResponse[] }): void {
-		const bin = join(this.root, "bin");
+		const bin = join(this.root, "matcher bin");
 		mkdirSync(bin, { recursive: true });
-		for (const name of ["fzf", "sk"]) symlinkSync(STUB_MATCHER, join(bin, name));
+		for (const name of ["fzf", "sk"]) {
+			if (process.platform === "win32") {
+				// Windows cannot execute a shebang script and symlinks require extra privileges.
+				writeFileSync(join(bin, `${name}.cmd`), `@echo off\r\n"${process.execPath}" "${STUB_MATCHER}" %*\r\n`);
+			} else {
+				symlinkSync(STUB_MATCHER, join(bin, name));
+			}
+		}
 		const config = join(this.root, "matcher-config.json");
 		writeFileSync(config, JSON.stringify({ responses: stub.responses ?? [] }));
-		this.setEnv("PATH", `${bin}:${process.env.PATH ?? ""}`);
+		this.setEnv("PATH", `${bin}${delimiter}${process.env.PATH ?? ""}`);
 		this.setEnv("STUB_MATCHER_CONFIG", config);
 		this.setEnv("STUB_MATCHER_LOG", this.matcherLog);
 	}

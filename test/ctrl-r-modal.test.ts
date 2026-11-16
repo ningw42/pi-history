@@ -219,7 +219,7 @@ describe("history records", () => {
 		assert.deepEqual(h.modalBody(), ["› from env dir"]);
 	});
 
-	test("still load when neighbouring session files are malformed or unreadable", async (t) => {
+	test("still load when neighbouring session files are malformed", async (t) => {
 		const h = useHarness(t);
 		h.writeSession({ cwd: h.cwd, prompts: [{ text: "valid prompt", timestamp: minutesAfterT0(1) }] });
 		writeFileSync(join(h.sessionDir, "2026-11-01T09-02-00-000Z_garbage.jsonl"), "not json at all\n{{{\n");
@@ -227,14 +227,31 @@ describe("history records", () => {
 			join(h.sessionDir, "2026-11-01T09-03-00-000Z_headerless.jsonl"),
 			`${JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: new Date(minutesAfterT0(3)).toISOString(), message: { role: "user", content: "no header", timestamp: minutesAfterT0(3) } })}\n`,
 		);
-		const unreadable = h.writeSession({ cwd: h.cwd, prompts: [{ text: "unreadable", timestamp: minutesAfterT0(4) }] });
-		chmodSync(unreadable, 0);
 		await h.start();
 
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
 		assert.deepEqual(h.modalBody(), ["› valid prompt"]);
+	});
+
+	test("still load when a neighbouring session file is unreadable", {
+		skip: process.platform === "win32" || process.getuid?.() === 0
+			? "POSIX read-permission test requires a non-root Unix user"
+			: false,
+	}, async (t) => {
+		const h = useHarness(t);
+		h.writeSession({ cwd: h.cwd, prompts: [{ text: "valid prompt", timestamp: minutesAfterT0(1) }] });
+		const unreadable = h.writeSession({ cwd: h.cwd, prompts: [{ text: "unreadable", timestamp: minutesAfterT0(4) }] });
+		chmodSync(unreadable, 0);
+		try {
+			await h.start();
+			h.press(Keys.ctrlR);
+			await h.loaded();
+			assert.deepEqual(h.modalBody(), ["› valid prompt"]);
+		} finally {
+			chmodSync(unreadable, 0o600);
+		}
 	});
 
 	test("show a multi-line prompt as one row", async (t) => {
@@ -612,13 +629,18 @@ describe("test harness", () => {
 		}
 	});
 
-	test("can put a scripted stub matcher on PATH that records its invocations", async (t) => {
-		const h = useHarness(t, { stubMatcher: { responses: [{ query: "q", output: ["b"], exitCode: 0 }] } });
+	for (const name of ["fzf", "sk"]) {
+		test(`can put a scripted ${name} on PATH that records its invocations`, async (t) => {
+			const h = useHarness(t, { stubMatcher: { responses: [{ query: "q", output: ["b"], exitCode: 0 }] } });
 
-		const output = execFileSync("fzf", ["--filter", "q", "--read0", "--print0"], { input: "a\0b\0" });
+			// Only fixed test arguments go through cmd.exe; Windows cannot exec a .cmd directly.
+			const output = process.platform === "win32"
+				? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `${name} --filter q --read0 --print0`], { input: "a\0b\0" })
+				: execFileSync(name, ["--filter", "q", "--read0", "--print0"], { input: "a\0b\0" });
 
-		assert.equal(output.toString(), "b\0");
-		const calls = h.matcherCalls().map(({ argv, input }) => ({ argv, input }));
-		assert.deepEqual(calls, [{ argv: ["--filter", "q", "--read0", "--print0"], input: ["a", "b"] }]);
-	});
+			assert.equal(output.toString(), "b\0");
+			const calls = h.matcherCalls().map(({ argv, input }) => ({ argv, input }));
+			assert.deepEqual(calls, [{ argv: ["--filter", "q", "--read0", "--print0"], input: ["a", "b"] }]);
+		});
+	}
 });

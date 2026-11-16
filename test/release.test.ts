@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -14,8 +14,10 @@ function releaseRepo(t: TestContext) {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-history-release-"));
 	t.after(() => rmSync(cwd, { recursive: true, force: true }));
 	// Ignore contributor hooks, signing and identity in this disposable fixture.
+	const hooks = join(cwd, "empty-hooks");
+	mkdirSync(hooks);
 	const git = (...args: string[]) => execFileSync("git", [
-		"-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+		"-c", `core.hooksPath=${hooks}`, "-c", "commit.gpgsign=false",
 		"-c", "tag.gpgsign=false", "-c", "user.name=Release test",
 		"-c", "user.email=release@example.invalid", ...args,
 	], { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();

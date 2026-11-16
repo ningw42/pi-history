@@ -117,7 +117,7 @@ The installed hook uses Nix store paths, so commits can also be made from outsid
 
 The hook runs `npm run check` when source, tests, release scripts or Node configuration change, formats Nix files, and lints workflow files. Hooks are a local convenience, not an enforcement boundary: non-Nix contributors can run the npm commands directly, and PR CI is authoritative. If a formatter changes a file, review and stage it before retrying the commit.
 
-`flake.lock` pins the Node/tooling environment for x86-64/ARM64 Linux and Apple Silicon macOS (the systems exposed by the pinned `git-hooks.nix`; Intel Mac contributors can use npm directly). This deliberately stays a **dev shell**, not a Nix package for the extension: Pi loads TypeScript directly, and duplicating npm dependency packaging would add little value. `git-hooks.nix` shares the same nixpkgs input.
+`flake.lock` pins the Node/tooling environment for x86-64/ARM64 Linux and Apple Silicon macOS (the systems exposed by the pinned `git-hooks.nix`; Intel Mac and Windows contributors can use npm directly). This deliberately stays a **dev shell**, not a Nix package for the extension: Pi loads TypeScript directly, and duplicating npm dependency packaging would add little value. `git-hooks.nix` shares the same nixpkgs input.
 
 ```sh
 nix fmt              # format flake.nix
@@ -125,11 +125,11 @@ nix flake check      # sandboxed Nix formatting and GitHub Actions lint checks
 nix flake update     # explicitly refresh Nix inputs; review and commit flake.lock
 ```
 
-The sandboxed flake check excludes npm checks because it has neither network access nor `node_modules`; CI runs those separately with `npm ci`. Local `.pi/` agent state, generated hook configuration and Nix result links are ignored.
+`nix flake check` is a local convenience, not a CI job. It excludes npm checks because its sandbox has neither network access nor `node_modules`; CI runs the npm checks directly. Local `.pi/` agent state, generated hook configuration and Nix result links are ignored.
 
 ### CI and releases
 
-Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux and macOS**, each with **Node 26**, read from `.node-version` (also used by the release job), plus the sandboxed flake/workflow checks on Linux. Actions are pinned to commits; Dependabot proposes monthly action updates. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
+Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux, macOS and Windows**, each with **Node 26**, read from `.node-version` (also used by the release job). The runners are `ubuntu-latest`, `macos-latest` and `windows-latest`, using their default architectures; Windows uses amd64/x64. Nix and workflow lint checks remain local only. Actions are pinned to commits; Dependabot proposes monthly action updates. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
 
 Distribution remains Git-only: `package.json` is `private` to prevent accidental npm publication. Pi reads the existing `pi.extensions` entry point from the checkout and supplies the host packages declared as peers. There is no bundling, npm token, uploaded tarball or compiled release asset. GitHub provides its usual source archives.
 
@@ -157,4 +157,4 @@ The tests load the real entry point against a fake Pi API and UI context, with P
 
 Tests assert on what a user sees: the input bar's text and cursor, and the rendered overlay lines. The one allowed exception is a narrow set of safety checks at the extension's boundary with Pi, for behaviour that has no visible output: prompts handed to Pi for submission ("nothing is submitted"), what the extension registered or installed with Pi ("registers nothing outside TUI mode"), and the session files on disk ("never written"). Tests never assert on the extension's private state.
 
-The harness (`test/harness.ts`) can also put a scripted stub matcher on `PATH` as `fzf` and `sk`, ready for #3 and #4.
+The harness (`test/harness.ts`) can also put a scripted stub matcher on `PATH` as `fzf` and `sk`, ready for #3 and #4. Windows uses `.cmd` launchers rather than Unix executable symlinks. The POSIX read-permission test is skipped on Windows (and for root); malformed-session coverage runs everywhere. CI exercises the extension-boundary suite, not the real Pi terminal executable, so the Windows job is not an interactive Windows smoke test.
