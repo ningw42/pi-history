@@ -35,10 +35,18 @@ The remaining sub-issues of #1, in order:
 
 ## Install
 
-From a clone:
+Install the latest `main` from Git (no npm publication or build needed):
 
 ```sh
-npm install
+pi install git:github.com/ningw42/pi-history
+```
+
+For a pinned release, append a published tag, for example `git:github.com/ningw42/pi-history@v0.1.0` once that release exists. Tags stay pinned when Pi updates packages; choose a newer tag explicitly to upgrade.
+
+From a development clone:
+
+```sh
+npm ci --ignore-scripts
 pi -e ./src/index.ts            # try it once
 pi install /path/to/pi-history  # or add it to your Pi settings
 ```
@@ -79,11 +87,67 @@ The matcher adapter (#3), configuration (#4) and skill restoration (#7) are the 
 
 ## Development
 
+Use **Node 24** (`.node-version`) and npm. Node 22.19 is the minimum supported version, matching Pi 1.5.2's requirement. The committed `package-lock.json` is the authority for JavaScript dependencies.
+
 ```sh
-npm install
+npm ci --ignore-scripts
+npm run check       # typecheck and all tests; also used by CI and the Git hook
 npm run typecheck   # tsc, no emit
-npm test            # extension-boundary suite (node:test, Node's built-in TypeScript support)
+npm test            # node:test, using Node's built-in TypeScript support
 ```
+
+Installation scripts are deliberately disabled: this source-only extension needs no build, and its development dependencies work without lifecycle scripts. `npm run check` still runs normally. No `prepare` hook modifies a consumer's checkout or requires Nix.
+
+### Optional Nix shell and pre-commit hooks
+
+```sh
+nix develop          # Node 24, Git, pre-commit, actionlint and nixfmt
+npm ci --ignore-scripts
+pre-commit run --all-files
+pre-commit install   # optional: enable checks on each commit
+```
+
+With direnv and nix-direnv installed, `direnv allow` uses `.envrc` to enter the same shell. Entering it generates the ignored `.pre-commit-config.yaml` link; it does **not** install npm dependencies or modify Git hooks. The upstream automatic installer is disabled because it rewrites `core.hooksPath`. `pre-commit install` explicitly opts in; it refuses a custom `core.hooksPath` and preserves an existing pre-commit hook in migration mode. Use `pre-commit uninstall` to opt out.
+
+The installed hook uses Nix store paths, so commits can also be made from outside the shell. Run `nix develop` again after updating the flake. If garbage collection removes the tools, remove the generated `.pre-commit-config.yaml` link, re-enter the shell and reinstall the hook. The shell leaves an unrelated pre-commit configuration untouched.
+
+The hook runs `npm run check` when source, tests, release scripts or Node configuration change, formats Nix files, and lints workflow files. Hooks are a local convenience, not an enforcement boundary: non-Nix contributors can run the npm commands directly, and PR CI is authoritative. If a formatter changes a file, review and stage it before retrying the commit.
+
+`flake.lock` pins the Node/tooling environment for x86-64/ARM64 Linux and Apple Silicon macOS (the systems exposed by the pinned `git-hooks.nix`; Intel Mac contributors can use npm directly). This deliberately stays a **dev shell**, not a Nix package for the extension: Pi loads TypeScript directly, and duplicating npm dependency packaging would add little value. `git-hooks.nix` shares the same nixpkgs input.
+
+```sh
+nix fmt              # format flake.nix
+nix flake check      # sandboxed Nix formatting and GitHub Actions lint checks
+nix flake update     # explicitly refresh Nix inputs; review and commit flake.lock
+```
+
+The sandboxed flake check excludes npm checks because it has neither network access nor `node_modules`; CI runs those separately with `npm ci`. Local `.pi/` agent state, `.direnv/`, generated hook configuration and Nix result links are ignored.
+
+### CI and releases
+
+Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux and macOS**, each with **Node 22.19 and 24**, plus the sandboxed flake/workflow checks on Linux. Actions are pinned to commits; Dependabot proposes monthly action updates. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
+
+Distribution remains Git-only: `package.json` is `private` to prevent accidental npm publication. Pi reads the existing `pi.extensions` entry point from the checkout and supplies the host packages declared as peers. There is no bundling, npm token, uploaded tarball or compiled release asset. GitHub provides its usual source archives.
+
+To release:
+
+1. On a normal PR branch, run `npm version patch --no-git-tag-version` (or choose `minor`, `major`, or an explicit stable version). This updates both `package.json` and `package-lock.json`. Commit both files and merge the PR after checks pass.
+2. Tag the merged commit from an up-to-date `main` and push the tag:
+
+   ```sh
+   git switch main
+   git pull --ff-only
+   version=$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')
+   git tag -a "v$version" -m "v$version"
+   npm run release:check -- "v$version"
+   git push origin "v$version"
+   ```
+
+3. `.github/workflows/release.yml` reruns the same CI suite for the tagged commit. Only after it passes, the release job checks that the stable `vX.Y.Z` tag matches both version fields in the lockfile and `package.json`, points at the checked-out commit, and is contained in `origin/main`. It then creates a GitHub release with generated notes using the built-in `GITHUB_TOKEN`. Only this job gets `contents: write`. Re-running the job leaves an existing release unchanged.
+
+For the first release, the existing `0.1.0` can be tagged after this setup is merged; no artificial bump is needed. Prerelease tags are not supported yet. Published tags are immutable by convention: fix a bad release with a new version instead of moving its tag. A tag is installable by Pi as soon as it is pushed, even if the GitHub release checks later fail—those checks gate the GitHub release, not Git access to the ref. Generated release notes live on GitHub; this setup does not maintain a `CHANGELOG.md` for Pi's in-app update notices.
+
+### Tests
 
 The tests load the real entry point against a fake Pi API and UI context, with Pi's real editor component (Pi's text-input component joins it with the query line in #3). The fake mirrors Pi's overlay lifecycle: the overlay is mounted asynchronously, and closing it gives focus back to the editor before the result arrives. History comes from synthetic session files in a temporary agent directory (`PI_CODING_AGENT_DIR`), so no real prompt history is read.
 
