@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, Input, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { HistoryRecord } from "./history-source.ts";
@@ -22,21 +23,11 @@ export interface HistoryModalOptions {
 type LoadState = { kind: "loading" } | { kind: "ready"; records: HistoryRecord[] } | { kind: "error"; message: string };
 
 /**
- * What the list area shows once history has loaded. Records stay on screen while a newer query is
- * being matched, so the list does not flicker, but they cannot be confirmed until the latest
- * query's outcome replaces them.
+ * What the list area shows once history has loaded: an empty query's records newest first, or the
+ * latest matcher outcome. Records stay on screen while a newer query is being matched, so the list
+ * does not flicker, but they cannot be confirmed until the latest query's outcome replaces them.
  */
-type Results =
-	| { kind: "searching" }
-	| { kind: "records"; records: HistoryRecord[] }
-	| { kind: "failure"; message: string };
-
-/** A pending or running matcher run; aborting `cancel` cancels it. */
-interface SearchRun {
-	cancel: AbortController;
-	/** Set while the run waits out the debounce. */
-	timer?: ReturnType<typeof setTimeout>;
-}
+type Results = { kind: "searching" } | MatchOutcome<HistoryRecord>;
 
 /** Pause after a query edit before matching, so a burst of keys starts one matcher run. */
 const SEARCH_DEBOUNCE_MS = 50;
@@ -58,13 +49,15 @@ export class HistoryModal implements Component, Focusable {
 	private readonly query = new Input({ prompt: "> " });
 	private history: LoadState = { kind: "loading" };
 	private results: Results = { kind: "searching" };
-	/** Set from a query change until its outcome is shown; meanwhile the results are out of date. */
-	private search: SearchRun | undefined;
+	/**
+	 * Cancels the latest query's search, through its debounce and its matcher run. Set from a query
+	 * change until its outcome is shown; meanwhile the results are out of date.
+	 */
+	private search: AbortController | undefined;
 	/** Index into the shown records; 0 is the best candidate. */
 	private selected = 0;
 	/** Index of the lowest list row on screen, so the selection can scroll into view. */
 	private scrollOffset = 0;
-	private hasFocus = false;
 
 	constructor(options: HistoryModalOptions) {
 		this.options = options;
@@ -87,6 +80,9 @@ export class HistoryModal implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		// Keys from the input batch that closed the modal still arrive here; they belong to the
+		// closed modal, so they neither edit the query nor start a search.
+		if (this.abort.signal.aborted) return;
 		const { keybindings } = this.options;
 		if (keybindings.matches(data, "tui.select.cancel")) {
 			this.close({ kind: "dismiss" });
@@ -109,11 +105,10 @@ export class HistoryModal implements Component, Focusable {
 
 	/** Set by Pi's TUI; passed on so the query line shows the terminal cursor. */
 	get focused(): boolean {
-		return this.hasFocus;
+		return this.query.focused;
 	}
 
 	set focused(value: boolean) {
-		this.hasFocus = value;
 		this.query.focused = value;
 	}
 
@@ -153,7 +148,7 @@ export class HistoryModal implements Component, Focusable {
 				theme.fg("muted", "Clear the query to browse recent prompts"),
 			];
 		}
-		const records = this.results.records;
+		const { records } = this.results;
 		if (records.length === 0) return [theme.fg("muted", "No matches")];
 
 		const visible = this.listRows();
@@ -176,7 +171,7 @@ export class HistoryModal implements Component, Focusable {
 	}
 
 	private shownRecords(): HistoryRecord[] {
-		return this.history.kind === "ready" && this.results.kind === "records" ? this.results.records : [];
+		return this.history.kind === "ready" && this.results.kind === "matches" ? this.results.records : [];
 	}
 
 	private moveSelection(delta: number): void {
@@ -197,30 +192,24 @@ export class HistoryModal implements Component, Focusable {
 		const records = this.history.records;
 		const query = this.query.getValue();
 		if (query.trim() === "" || records.length === 0) {
-			this.showResults({ kind: "records", records });
+			this.showResults({ kind: "matches", records });
 			return;
 		}
-		const cancel = new AbortController();
-		const search: SearchRun = { cancel };
+		const search = new AbortController();
 		this.search = search;
-		search.timer = setTimeout(() => {
-			search.timer = undefined;
-			this.options.matcher
-				.match(query, records, cancel.signal)
-				// Only a cancelled run rejects, and its outcome is discarded below.
-				.catch((error: unknown): MatchOutcome<HistoryRecord> => ({ kind: "failure", message: errorMessage(error) }))
-				.then((outcome) => {
-					if (cancel.signal.aborted) return;
-					this.search = undefined;
-					this.showResults(outcome.kind === "matches" ? { kind: "records", records: outcome.records } : outcome);
-				});
-		}, debounceMs);
+		delay(debounceMs, undefined, { signal: search.signal })
+			.then(() => this.options.matcher.match(query, records, search.signal))
+			// Only a cancelled search rejects, and its outcome is discarded below.
+			.catch((error: unknown): MatchOutcome<HistoryRecord> => ({ kind: "failure", message: errorMessage(error) }))
+			.then((outcome) => {
+				if (search.signal.aborted) return;
+				this.search = undefined;
+				this.showResults(outcome);
+			});
 	}
 
 	private cancelSearch(): void {
-		if (!this.search) return;
-		clearTimeout(this.search.timer);
-		this.search.cancel.abort();
+		this.search?.abort();
 		this.search = undefined;
 	}
 
@@ -233,7 +222,6 @@ export class HistoryModal implements Component, Focusable {
 	}
 
 	private close(result: ModalResult): void {
-		if (this.abort.signal.aborted) return;
 		this.dispose();
 		this.options.done(result);
 	}
@@ -242,8 +230,10 @@ export class HistoryModal implements Component, Focusable {
 /**
  * The query a draft starts the modal with. A whitespace-only draft means no query. Otherwise the
  * draft is kept verbatim, so the matcher's search syntax applies, except that line breaks become
- * spaces: the query line holds one line, and the matcher separates terms on whitespace anyway.
- * (Pi's editor stores tabs as spaces, so the paste that seeds the query line changes nothing else.)
+ * spaces, because the query line (Pi's single-line Input) cannot hold one. fzf separates terms on
+ * spaces only, so a multi-line draft's lines are then matched as separate terms, more loosely than
+ * the exact multi-line text would be. (Pi's editor stores tabs as spaces, so the paste that seeds
+ * the query line changes nothing else.)
  */
 function startingQuery(draft: string): string {
 	return draft.trim() === "" ? "" : draft.replace(/\r\n|\r|\n/g, " ");

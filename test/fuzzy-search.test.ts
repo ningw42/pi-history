@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 import { type HarnessOptions, Keys, minutesAfterT0, type StubMatcherCall, useHarness } from "./harness.ts";
 
@@ -6,8 +8,9 @@ import { type HarnessOptions, Keys, minutesAfterT0, type StubMatcherCall, useHar
 const SETTLE_MS = 300;
 const settle = () => new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
 
+const windowsSkip = (reason: string) => ({ skip: process.platform === "win32" ? reason : false });
 /** Node refuses to start the stub's `.cmd` launcher without a shell, and the matcher never uses one. */
-const needsStub = { skip: process.platform === "win32" ? "the stub matcher cannot be started without a shell on Windows" : false };
+const needsStub = windowsSkip("the stub matcher cannot be started without a shell on Windows");
 
 type TestContext = Parameters<typeof useHarness>[0];
 
@@ -82,6 +85,51 @@ describe("the query line", () => {
 		await h.loaded();
 
 		assert.equal(h.modalQuery(200), `> before ${pasted.join(" ")}`);
+	});
+
+	test("shows the terminal cursor only while the modal has Pi's focus", async (t) => {
+		const h = harnessWithPrompts(t, ["one"]);
+		await h.start();
+		h.press(Keys.ctrlR);
+		await h.loaded();
+		assert.equal(h.modalShowsCursor(), true);
+
+		h.setOverlayFocus(false);
+		assert.equal(h.modalShowsCursor(), false);
+		h.setOverlayFocus(true);
+		assert.equal(h.modalShowsCursor(), true);
+		h.type("x");
+		assert.equal(h.modalQuery(), "> x");
+	});
+});
+
+describe("keys in the same input batch as closing the modal", () => {
+	test("after Escape they reach neither the draft nor the matcher", needsStub, async (t) => {
+		const h = harnessWithPrompts(t, ["apple"]);
+		await h.start();
+		h.type("ap");
+		h.press(Keys.ctrlR);
+		await h.waitFor(() => h.modalList().join() === "› apple", "results for ap");
+
+		h.press(Keys.escape, "x");
+		await settle();
+
+		assert.deepEqual(h.overlayLines(), []);
+		assert.equal(h.editorText(), "ap");
+		assert.deepEqual(h.matcherCalls().map(queryOf), ["ap"]);
+	});
+
+	test("after Enter they reach neither the confirmed text nor the matcher", needsStub, async (t) => {
+		const h = harnessWithPrompts(t, ["apple"]);
+		await h.start();
+		h.press(Keys.ctrlR);
+		await h.loaded();
+
+		h.press(Keys.enter, "x");
+		await settle();
+
+		assert.equal(h.editorText(), "apple");
+		assert.deepEqual(h.matcherCalls(), []);
 	});
 });
 
@@ -226,6 +274,9 @@ describe("searching as you type", () => {
 		h.type("a");
 		await h.waitFor(() => h.matcherCalls().length === 1, "the first run to start");
 		h.type("p");
+		await h.flush();
+		// The cancelled run shows nothing, not even its cancellation: the list waits for "ap".
+		assert.deepEqual(h.modalList(), ["  apple", "› apricot"]);
 		await h.waitFor(() => h.modalList().join() === "› apricot", "results for ap");
 		await new Promise((resolve) => setTimeout(resolve, 700)); // past the slow run's delay
 
@@ -251,6 +302,18 @@ describe("searching as you type", () => {
 
 		assert.equal(h.matcherCalls()[0]?.finished, false);
 		assert.equal(h.editorText(), "apple");
+	});
+
+	test("dismissing the modal before the debounce ends starts no matcher", needsStub, async (t) => {
+		const h = harnessWithPrompts(t, ["apple"]);
+		await h.start();
+		h.press(Keys.ctrlR);
+		await h.loaded();
+
+		h.press("a", Keys.escape);
+		await settle();
+
+		assert.deepEqual(h.matcherCalls(), []);
 	});
 
 	test("each new result list selects its best candidate", needsStub, async (t) => {
@@ -330,4 +393,64 @@ describe("matcher outcomes", () => {
 			"Clear the query to browse recent prompts",
 		]);
 	});
+
+	test("a fzf ended by a signal is reported, and clearing the query still browses", needsStub, async (t) => {
+		const h = harnessWithPrompts(t, ["one", "two"], { stubMatcher: { responses: [{ signal: "SIGKILL" }] } });
+		await h.start();
+		h.type("one");
+
+		h.press(Keys.ctrlR);
+		await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
+
+		assert.deepEqual(h.modalList(), ["Search failed: fzf was terminated by SIGKILL", "Clear the query to browse recent prompts"]);
+		h.press(Keys.clearLine);
+		assert.deepEqual(h.modalList(), ["  one", "› two"]);
+	});
+
+	test(
+		"a fzf that cannot be executed is reported, and clearing the query still browses",
+		windowsSkip("Windows files have no execute permission"),
+		async (t) => {
+			const h = harnessWithPrompts(t, ["one", "two"]);
+			const bin = h.path("unexecutable bin");
+			mkdirSync(bin);
+			writeFileSync(join(bin, "fzf"), "#!/bin/sh\n", { mode: 0o644 });
+			h.setEnv("PATH", bin);
+			await h.start();
+			h.type("one");
+
+			h.press(Keys.ctrlR);
+			await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
+
+			assert.deepEqual(h.modalList(), [
+				"Search failed: could not run fzf: spawn fzf EACCES",
+				"Clear the query to browse recent prompts",
+			]);
+			h.press(Keys.clearLine);
+			assert.deepEqual(h.modalList(), ["  one", "› two"]);
+		},
+	);
+
+	test(
+		"a query too long to start fzf with is reported, and clearing the query still browses",
+		windowsSkip("Windows limits the command line differently"),
+		async (t) => {
+			const h = harnessWithPrompts(t, ["one", "two"]);
+			await h.start();
+			h.press(Keys.ctrlR);
+			await h.loaded();
+
+			// Past Linux's per-argument limit (128 KiB) and macOS's whole-command-line limit (1 MiB):
+			// Node then fails to start the process synchronously instead of reporting an error event.
+			h.press(`\x1b[200~${"q".repeat(2 ** 21)}\x1b[201~`);
+			await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
+
+			assert.deepEqual(h.modalList(), [
+				"Search failed: could not run fzf: spawn E2BIG",
+				"Clear the query to browse recent prompts",
+			]);
+			h.press(Keys.clearLine);
+			assert.deepEqual(h.modalList(), ["  one", "› two"]);
+		},
+	);
 });

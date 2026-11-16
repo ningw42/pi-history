@@ -2,10 +2,12 @@
 // Scripted stand-in for fzf/sk used by the extension-boundary tests.
 //
 // STUB_MATCHER_CONFIG: optional path to JSON
-//   { "responses": [{ "query": "...", "output": ["record", ...], "exitCode": 0, "delayMs": 0, "stderr": "..." }] }
+//   { "responses": [{ "query": "...", "output": ["record", ...], "exitCode": 0, "delayMs": 0, "stderr": "...",
+//                     "signal": "SIGKILL" }] }
 //   A response whose query equals the received query (or that has no query) is used; otherwise
 //   the stub keeps input records containing the query (case-insensitive), in input order, and
-//   exits 1 when nothing matches, like fzf.
+//   exits 1 when nothing matches, like fzf. A response with a signal ends the stub by that signal
+//   after its delay, with no output.
 // STUB_MATCHER_LOG: optional path; one JSON line is appended when an invocation starts:
 //   { "pid": 123, "argv": [...], "env": { matcher env vars }, "input": ["record", ...] }
 //   and another, { "pid": 123, "finished": true }, if it outlives its scripted delay.
@@ -32,6 +34,7 @@ if (response?.delayMs) await new Promise((resolve) => setTimeout(resolve, respon
 const output = response?.output ?? input.filter((record) => record.toLowerCase().includes((query ?? "").toLowerCase()));
 const exitCode = response?.exitCode ?? (output.length > 0 ? 0 : 1);
 log({ finished: true });
+if (response?.signal) process.kill(process.pid, response.signal);
 if (response?.stderr) process.stderr.write(response.stderr);
 if (output.length > 0) process.stdout.write(`${output.join("\0")}\0`);
 process.exitCode = exitCode;

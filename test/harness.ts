@@ -9,7 +9,9 @@
  *
  * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
  * rendered overlay lines (`overlayLines()`, `modalList()`, `modalQuery()`; empty when no overlay is
- * shown). The one allowed exception is a narrow set of checks at the extension's external
+ * shown), including whether the modal places the terminal cursor (`modalShowsCursor()`). Like Pi,
+ * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
+ * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
  * boundaries, for behaviour that has no visible output: prompts handed to Pi for submission
  * (`submissions`), what the extension registered or installed (`registrations`,
  * `editorFactoryInstalls`, `overlayRequests`, `notifications`), the session files on disk, and what
@@ -33,9 +35,11 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+	CURSOR_MARKER,
 	type Component,
 	type EditorComponent,
 	type EditorTheme,
+	type Focusable,
 	type KeybindingsConfig,
 	KeybindingsManager,
 	setKeybindings,
@@ -85,6 +89,8 @@ export interface StubMatcherResponse {
 	delayMs?: number;
 	/** Written to the stub's standard error before it exits. */
 	stderr?: string;
+	/** After its delay the stub ends by this signal instead of an exit status, writing nothing. */
+	signal?: NodeJS.Signals;
 }
 
 export interface HarnessOptions {
@@ -265,6 +271,17 @@ export class Harness {
 		return this.modalSections(width).query;
 	}
 
+	/** Whether the rendered modal places the terminal cursor (Pi's cursor marker), as on a focused text input. */
+	modalShowsCursor(width = 80): boolean {
+		return this.overlay?.component.render(width).some((line) => line.includes(CURSOR_MARKER)) ?? false;
+	}
+
+	/** Move Pi's focus off the shown overlay (as when another component takes it) or back onto it. */
+	setOverlayFocus(focused: boolean): void {
+		if (!this.overlay) throw new Error("no overlay is shown");
+		setFocused(this.overlay.component, focused);
+	}
+
 	/** The overlay frame's rows, split at the rule above the query line. */
 	private modalSections(width: number): { list: string[]; query: string | undefined } {
 		const lines = this.overlayLines(width);
@@ -410,7 +427,10 @@ export class Harness {
 					const done = (result: T) => {
 						if (closed) return;
 						closed = true;
-						if (request && this.overlay === request) this.overlay = undefined;
+						if (request && this.overlay === request) {
+							this.overlay = undefined;
+							setFocused(request.component, false);
+						}
 						request?.component.dispose?.();
 						resolve(result);
 					};
@@ -418,7 +438,9 @@ export class Harness {
 					request = { component, options };
 					this.overlayRequests.push(request);
 					void Promise.resolve().then(() => {
-						if (!closed) this.overlay = request;
+						if (closed) return;
+						this.overlay = request;
+						setFocused(component, true);
 					});
 				}),
 			setEditorText: () => {
@@ -436,6 +458,11 @@ export class Harness {
 			},
 		} as unknown as ExtensionContext;
 	}
+}
+
+/** Mirrors Pi's TUI.setFocus: a component with a `focused` property is told when it gains or loses focus. */
+function setFocused(component: Component, focused: boolean): void {
+	if ("focused" in component) (component as Component & Focusable).focused = focused;
 }
 
 /** Pi's default per-cwd session directory under the agent directory. */
