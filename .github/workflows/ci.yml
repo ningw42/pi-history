@@ -25,7 +25,7 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      # The matcher adapter tests run the real fzf and fail without it.
+      # The matcher adapter tests run the real fzf and sk and fail without them.
       - name: Install fzf
         shell: bash
         run: |
@@ -35,5 +35,30 @@ jobs:
             Windows) choco install fzf -y --no-progress ;;
           esac
           fzf --version
+      # Package managers ship skim releases years apart; use one pinned upstream release everywhere.
+      # The checksums are pinned here rather than read from the release being downloaded.
+      - name: Install sk
+        shell: bash
+        env:
+          SKIM_VERSION: v5.9.0
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) asset=skim-x86_64-unknown-linux-musl.tar.xz sha256=de1ab4c6a0e53e3ed7850048ddd622b830b5aee2dc8ad8f0925f1fbf79e01eef ;;
+            macOS-ARM64) asset=skim-aarch64-apple-darwin.tar.xz sha256=9fe50c046ca23def3fb6b6d01cf60cc2c4aa24752936f5745899c61c324b6b26 ;;
+            Windows-X64) asset=skim-x86_64-pc-windows-msvc.zip sha256=12ffcb2568b070d3337aeb00c9eafb84fab63b76f00dc709ab9e0079ee1e1e27 ;;
+            *) echo "::error::no pinned skim build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          archive="$RUNNER_TEMP/$asset"
+          bin="$RUNNER_TEMP/skim"
+          curl -fsSL --retry 3 -o "$archive" "https://github.com/skim-rs/skim/releases/download/$SKIM_VERSION/$asset"
+          actual=$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(require("node:fs").readFileSync(process.argv[1])).digest("hex"))' "$archive")
+          if [ "$actual" != "$sha256" ]; then echo "::error::$asset has sha256 $actual, expected $sha256"; exit 1; fi
+          mkdir -p "$bin"
+          case "$asset" in
+            *.zip) 7z x -y -o"$bin" "$archive" sk.exe > /dev/null ;;
+            *) tar -xJf "$archive" -C "$bin" --strip-components=1 ;;
+          esac
+          if [ "$RUNNER_OS" = Windows ]; then cygpath -w "$bin" >> "$GITHUB_PATH"; else echo "$bin" >> "$GITHUB_PATH"; fi
+          "$bin/sk" --version
       - run: npm ci --ignore-scripts
       - run: npm run check

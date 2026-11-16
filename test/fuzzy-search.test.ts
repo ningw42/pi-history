@@ -2,30 +2,43 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { type HarnessOptions, Keys, minutesAfterT0, type StubMatcherCall, useHarness } from "./harness.ts";
+import { type HarnessOptions, harnessWithPrompts, Keys, needsStub, type StubMatcherCall, windowsSkip } from "./harness.ts";
 
 /** Long enough for a debounced matcher run to have started, were one going to. */
 const SETTLE_MS = 300;
 const settle = () => new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
 
-const windowsSkip = (reason: string) => ({ skip: process.platform === "win32" ? reason : false });
-/** Node refuses to start the stub's `.cmd` launcher without a shell, and the matcher never uses one. */
-const needsStub = windowsSkip("the stub matcher cannot be started without a shell on Windows");
-
-type TestContext = Parameters<typeof useHarness>[0];
-
-/** A harness with one session in the current directory holding `prompts`, oldest first. */
-function harnessWithPrompts(t: TestContext, prompts: string[], options: HarnessOptions = {}) {
-	const h = useHarness(t, options);
-	h.writeSession({ cwd: h.cwd, prompts: prompts.map((text, i) => ({ text, timestamp: minutesAfterT0(i + 1) })) });
-	return h;
-}
-
 /** The query a matcher invocation was given. */
 function queryOf(call: StubMatcherCall): string | undefined {
-	const at = call.argv.indexOf("--filter");
-	return at === -1 ? undefined : call.argv[at + 1];
+	return call.argv.find((arg) => arg.startsWith("--filter="))?.slice("--filter=".length);
 }
+
+/**
+ * Each matcher's side of the process contract, as fixture data: how it is selected, what it must be
+ * started with, which inherited options it must not see, and an error it might print. The query
+ * starts with `-`, which a matcher must still read as the filter, not as an option.
+ */
+const QUERY = "-x 'exact ^start !not | either$";
+const MATCHERS = [
+	{
+		name: "fzf",
+		config: undefined, // the default
+		argv: [`--filter=${QUERY}`, "--read0", "--print0", "--scheme=history"],
+		optionVariables: ["FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE"],
+		unrelatedVariable: "FZF_PI_HISTORY_TEST",
+		stderr: "unknown option: --bogus\nusage: fzf [options]\n",
+		firstStderrLine: "unknown option: --bogus",
+	},
+	{
+		name: "sk",
+		config: { matcher: "sk" },
+		argv: [`--filter=${QUERY}`, "--read0", "--print0", "--tiebreak=score,index"],
+		optionVariables: ["SKIM_DEFAULT_OPTIONS", "SKIM_OPTIONS_FILE"],
+		unrelatedVariable: "SKIM_PI_HISTORY_TEST",
+		stderr: "error: unexpected argument '--bogus' found\n\nUsage: sk [OPTIONS]\n",
+		firstStderrLine: "error: unexpected argument '--bogus' found",
+	},
+] as const;
 
 describe("the query line", () => {
 	test("starts with the draft at the moment Ctrl+R is pressed", async (t) => {
@@ -194,39 +207,92 @@ describe("confirming during a search", () => {
 	});
 });
 
-describe("the fzf contract", () => {
-	test("fzf filters the records NUL-delimited and newest first, with the query verbatim", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["oldest", "two\nlines", "has\0nul", "newest"]);
-		await h.start();
-		const query = "'exact ^start !not | either$";
-		h.type(query);
+for (const matcher of MATCHERS) {
+	const { name } = matcher;
+	/** A harness with `prompts`, set up to use this matcher. */
+	const harnessFor = (t: Parameters<typeof harnessWithPrompts>[0], prompts: string[], options?: HarnessOptions) => {
+		const h = harnessWithPrompts(t, prompts, options);
+		if (matcher.config) h.writeConfig(matcher.config);
+		return h;
+	};
 
-		h.press(Keys.ctrlR);
-		await h.waitFor(() => h.matcherCalls().length > 0, "the matcher to start");
+	describe(`the ${name} contract`, () => {
+		test(`${name} filters the records NUL-delimited and newest first, with the query verbatim`, needsStub, async (t) => {
+			const h = harnessFor(t, ["oldest", "two\nlines", "has\0nul", "newest"]);
+			await h.start();
+			h.type(QUERY);
 
-		const [call] = h.matcherCalls();
-		assert.deepEqual(call?.argv, ["--filter", query, "--read0", "--print0", "--scheme=history"]);
-		// A record containing NUL cannot be delimited, so it is left out.
-		assert.deepEqual(call?.input, ["newest", "two\nlines", "oldest"]);
+			h.press(Keys.ctrlR);
+			await h.waitFor(() => h.matcherCalls().length > 0, "the matcher to start");
+
+			const [call] = h.matcherCalls();
+			assert.deepEqual(call?.argv, matcher.argv);
+			// A record containing NUL cannot be delimited, so it is left out.
+			assert.deepEqual(call?.input, ["newest", "two\nlines", "oldest"]);
+		});
+
+		test(`${name} does not inherit ${matcher.optionVariables.join(" or ")}`, needsStub, async (t) => {
+			const h = harnessFor(t, ["one"]);
+			const [optionsVariable, optionsFileVariable] = matcher.optionVariables;
+			h.setEnv(optionsVariable, "--no-sort --tac");
+			h.setEnv(optionsFileVariable, h.path("matcher-options"));
+			h.setEnv(matcher.unrelatedVariable, "inherited");
+			await h.start();
+			h.type("one");
+
+			h.press(Keys.ctrlR);
+			await h.waitFor(() => h.matcherCalls().length > 0, "the matcher to start");
+
+			const env = h.matcherCalls()[0]?.env ?? {};
+			assert.equal(env[matcher.unrelatedVariable], "inherited");
+			assert.equal(optionsVariable in env, false);
+			assert.equal(optionsFileVariable in env, false);
+		});
+
+		test(`${name}'s no-match status shows that nothing matched, and Enter then does nothing`, needsStub, async (t) => {
+			const h = harnessFor(t, ["one"]);
+			await h.start();
+			h.type("zzz");
+
+			h.press(Keys.ctrlR);
+			await h.waitFor(() => h.matcherCalls().length === 1 && !h.modalList().includes("Searching…"), "the search");
+
+			assert.deepEqual(h.modalList(), ["No matches"]);
+			h.press(Keys.enter);
+			await h.flush();
+			assert.equal(h.modalQuery(), "> zzz");
+			assert.equal(h.editorText(), "zzz");
+		});
+
+		test(`a missing ${name} is reported, and clearing the query still browses newest first`, async (t) => {
+			const h = harnessFor(t, ["one", "two"]);
+			h.setEnv("PATH", h.path("no-matcher-here"));
+			await h.start();
+			h.type("one");
+
+			h.press(Keys.ctrlR);
+			await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
+
+			assert.deepEqual(h.modalList(), [`Search failed: ${name} was not found`, "Clear the query to browse recent prompts"]);
+			h.press(Keys.clearLine);
+			assert.deepEqual(h.modalList(), ["  one", "› two"]);
+		});
+
+		test(`a failing ${name} is reported with its exit status and first line of error output`, needsStub, async (t) => {
+			const h = harnessFor(t, ["one"], { stubMatcher: { responses: [{ exitCode: 2, stderr: matcher.stderr }] } });
+			await h.start();
+			h.type("one");
+
+			h.press(Keys.ctrlR);
+			await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
+
+			assert.deepEqual(h.modalList(120), [
+				`Search failed: ${name} exited with status 2: ${matcher.firstStderrLine}`,
+				"Clear the query to browse recent prompts",
+			]);
+		});
 	});
-
-	test("fzf does not inherit FZF_DEFAULT_OPTS or FZF_DEFAULT_OPTS_FILE", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["one"]);
-		h.setEnv("FZF_DEFAULT_OPTS", "--no-sort --tac");
-		h.setEnv("FZF_DEFAULT_OPTS_FILE", h.path("fzf-options"));
-		h.setEnv("FZF_PI_HISTORY_TEST", "inherited");
-		await h.start();
-		h.type("one");
-
-		h.press(Keys.ctrlR);
-		await h.waitFor(() => h.matcherCalls().length > 0, "the matcher to start");
-
-		const env = h.matcherCalls()[0]?.env ?? {};
-		assert.equal(env.FZF_PI_HISTORY_TEST, "inherited");
-		assert.equal("FZF_DEFAULT_OPTS" in env, false);
-		assert.equal("FZF_DEFAULT_OPTS_FILE" in env, false);
-	});
-});
+}
 
 describe("searching as you type", () => {
 	test("typing searches for the latest query, and a later edit searches again", needsStub, async (t) => {
@@ -333,21 +399,6 @@ describe("searching as you type", () => {
 });
 
 describe("matcher outcomes", () => {
-	test("the no-match status shows that nothing matched, and Enter then does nothing", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["one"]);
-		await h.start();
-		h.type("zzz");
-
-		h.press(Keys.ctrlR);
-		await h.waitFor(() => h.matcherCalls().length === 1 && !h.modalList().includes("Searching…"), "the search");
-
-		assert.deepEqual(h.modalList(), ["No matches"]);
-		h.press(Keys.enter);
-		await h.flush();
-		assert.equal(h.modalQuery(), "> zzz");
-		assert.equal(h.editorText(), "zzz");
-	});
-
 	test("a query containing NUL is reported, since fzf cannot be given one", async (t) => {
 		const h = harnessWithPrompts(t, ["one"]);
 		await h.start();
@@ -362,36 +413,6 @@ describe("matcher outcomes", () => {
 			"Clear the query to browse recent prompts",
 		]);
 		assert.deepEqual(h.matcherCalls(), []);
-	});
-
-	test("a missing fzf is reported, and clearing the query still browses newest first", async (t) => {
-		const h = harnessWithPrompts(t, ["one", "two"]);
-		h.setEnv("PATH", h.path("no-matcher-here"));
-		await h.start();
-		h.type("one");
-
-		h.press(Keys.ctrlR);
-		await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
-
-		assert.deepEqual(h.modalList(), ["Search failed: fzf was not found", "Clear the query to browse recent prompts"]);
-		h.press(Keys.clearLine);
-		assert.deepEqual(h.modalList(), ["  one", "› two"]);
-	});
-
-	test("a failing fzf is reported with its exit status and error output", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["one"], {
-			stubMatcher: { responses: [{ exitCode: 2, stderr: "unknown option: --scheme=history\nusage: fzf [options]\n" }] },
-		});
-		await h.start();
-		h.type("one");
-
-		h.press(Keys.ctrlR);
-		await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
-
-		assert.deepEqual(h.modalList(), [
-			"Search failed: fzf exited with status 2: unknown option: --scheme=history",
-			"Clear the query to browse recent prompts",
-		]);
 	});
 
 	test("a fzf ended by a signal is reported, and clearing the query still browses", needsStub, async (t) => {

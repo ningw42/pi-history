@@ -3,7 +3,8 @@
  *
  * Loads the real extension entry point against a fake Pi API and UI context, with Pi's real
  * editor component. History comes from synthetic session files in a temporary agent directory;
- * no real prompt history is ever read. The fake mirrors Pi's overlay lifecycle: the overlay is
+ * no real prompt history is ever read. The extension's configuration file is read from that
+ * agent directory too (`writeConfig()`), so the user's real configuration never applies. The fake mirrors Pi's overlay lifecycle: the overlay is
  * mounted and focused asynchronously, and closing it gives focus back to the editor before the
  * result promise settles.
  *
@@ -58,6 +59,7 @@ export const Keys = {
 	enter: "\r",
 	escape: "\x1b",
 	ctrlR: "\x12",
+	ctrlT: "\x14",
 	/** Ctrl+U, Pi's delete-to-line-start: clears a line whose cursor is at its end. */
 	clearLine: "\x15",
 } as const;
@@ -67,6 +69,8 @@ const T0 = Date.UTC(2026, 10, 1, 9, 0, 0);
 export const minutesAfterT0 = (n: number) => T0 + n * 60_000;
 
 const STUB_MATCHER = fileURLToPath(new URL("./fixtures/stub-matcher.mjs", import.meta.url));
+/** Directory below the harness root holding the stub as `fzf` and `sk`; its name has a space on purpose. */
+const STUB_MATCHER_BIN = "matcher bin";
 
 export interface PromptSpec {
 	text: string;
@@ -219,11 +223,35 @@ export class Harness {
 		return file;
 	}
 
-	/** Load the extension through its real entry point and emit `session_start`. */
-	async start(): Promise<void> {
-		if (this.handlers.size === 0) piHistory(this.fakePi());
+	/** The extension's configuration file, in the agent directory Pi reports. */
+	get configPath(): string {
+		return join(this.agentDir, "pi-history.json");
+	}
+
+	/** Write the configuration file: a string verbatim, anything else as JSON. */
+	writeConfig(content: unknown): void {
+		mkdirSync(this.agentDir, { recursive: true });
+		writeFileSync(this.configPath, typeof content === "string" ? content : JSON.stringify(content));
+	}
+
+	/** Absolute path of the scripted stub installed as `name` (also reachable through PATH). */
+	stubMatcherPath(name: "fzf" | "sk"): string {
+		return join(this.path(STUB_MATCHER_BIN), process.platform === "win32" ? `${name}.cmd` : name);
+	}
+
+	/**
+	 * Start a session the way Pi 1.5.2 does, at startup and again on `/new`, `/resume`, `/fork` and
+	 * `/reload`: reset the extension UI (dropping the installed editor factory; the editor's text is
+	 * carried over), load the extension afresh through its real entry point, then emit
+	 * `session_start`. Pi also re-imports the module each time, which the harness cannot do, so the
+	 * extension must not rely on module state surviving between loads.
+	 */
+	async start(reason: "startup" | "new" | "resume" | "fork" | "reload" = "startup"): Promise<void> {
+		this.editorFactory = undefined;
+		this.handlers.clear();
+		piHistory(this.fakePi());
 		for (const handler of this.handlers.get("session_start") ?? []) {
-			await handler({ type: "session_start", reason: "startup" }, this.fakeContext());
+			await handler({ type: "session_start", reason }, this.fakeContext());
 		}
 	}
 
@@ -351,14 +379,14 @@ export class Harness {
 	}
 
 	private installStubMatcher(stub: { responses?: StubMatcherResponse[] }): void {
-		const bin = join(this.root, "matcher bin");
+		const bin = this.path(STUB_MATCHER_BIN);
 		mkdirSync(bin, { recursive: true });
-		for (const name of ["fzf", "sk"]) {
+		for (const name of ["fzf", "sk"] as const) {
 			if (process.platform === "win32") {
 				// Windows cannot execute a shebang script and symlinks require extra privileges.
-				writeFileSync(join(bin, `${name}.cmd`), `@echo off\r\n"${process.execPath}" "${STUB_MATCHER}" %*\r\n`);
+				writeFileSync(this.stubMatcherPath(name), `@echo off\r\n"${process.execPath}" "${STUB_MATCHER}" %*\r\n`);
 			} else {
-				symlinkSync(STUB_MATCHER, join(bin, name));
+				symlinkSync(STUB_MATCHER, this.stubMatcherPath(name));
 			}
 		}
 		const config = join(this.root, "matcher-config.json");
@@ -494,9 +522,24 @@ function fakeTheme(): Theme {
 	} as unknown as Theme;
 }
 
+type TestContext = { after(fn: () => void): void };
+
 /** Create a harness and dispose it after the test. */
-export function useHarness(t: { after(fn: () => void): void }, options?: HarnessOptions): Harness {
+export function useHarness(t: TestContext, options?: HarnessOptions): Harness {
 	const harness = new Harness(options);
 	t.after(() => harness.dispose());
 	return harness;
 }
+
+/** A harness with one session in the current directory holding `prompts`, oldest first. */
+export function harnessWithPrompts(t: TestContext, prompts: string[], options: HarnessOptions = {}): Harness {
+	const h = useHarness(t, options);
+	h.writeSession({ cwd: h.cwd, prompts: prompts.map((text, i) => ({ text, timestamp: minutesAfterT0(i + 1) })) });
+	return h;
+}
+
+/** Test options skipping a test on Windows, for `reason`. */
+export const windowsSkip = (reason: string) => ({ skip: process.platform === "win32" ? reason : false });
+
+/** Node refuses to start the stub's `.cmd` launcher without a shell, and the matcher never uses one. */
+export const needsStub = windowsSkip("the stub matcher cannot be started without a shell on Windows");

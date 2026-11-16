@@ -4,21 +4,30 @@ import { HistoryModal, type ModalResult } from "./history-modal.ts";
 import type { HistorySource, SessionContext } from "./history-source.ts";
 import type { Matcher } from "./matcher.ts";
 
-export interface EditorIntegrationOptions {
+/** The parts of the integration that come from the configuration. */
+export interface ConfiguredParts {
 	historySource: HistorySource;
 	matcher: Matcher;
-	/** Where the sessions for the current directory live, resolved when the modal opens. */
-	sessionContext: () => SessionContext;
 	/** Key that opens the history modal while the input bar has focus. */
 	searchKey: KeyId;
+}
+
+export interface EditorIntegrationOptions {
+	/**
+	 * The configured parts, looked up on every key. Not called while installing, so the caller can
+	 * install before any I/O and read the configuration right afterwards, in the same synchronous step.
+	 */
+	configured: () => ConfiguredParts;
+	/** Where the sessions for the current directory live, resolved when the modal opens. */
+	sessionContext: () => SessionContext;
 }
 
 /**
  * Install the entry points into the history modal on Pi's input bar.
  *
- * Must run synchronously inside `session_start`, before any asynchronous work: replacing the
- * editor later would dismiss a selector the user opened in the meantime (for example `/model`).
- * No history is read and no editor text is written here.
+ * Must run synchronously inside `session_start`, before any I/O: replacing the editor later would
+ * dismiss a selector the user opened in the meantime (for example `/model`). No history is read,
+ * no configuration is consulted and no editor text is written here.
  */
 export function installEditorIntegration(ctx: ExtensionContext, options: EditorIntegrationOptions): void {
 	const previous = ctx.ui.getEditorComponent();
@@ -35,7 +44,7 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 		 */
 		let pending: { modal?: HistoryModal } | undefined;
 
-		const openModal = () => {
+		const openModal = ({ historySource, matcher }: ConfiguredParts) => {
 			const session: { modal?: HistoryModal } = {};
 			pending = session;
 			// The draft as the user wrote it: a collapsed paste counts with its content.
@@ -48,8 +57,8 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 							theme: modalTheme,
 							keybindings: modalKeybindings,
 							draft,
-							loadRecords: (signal) => options.historySource.load(options.sessionContext(), signal),
-							matcher: options.matcher,
+							loadRecords: (signal) => historySource.load(options.sessionContext(), signal),
+							matcher,
 							done,
 						});
 						return session.modal;
@@ -74,8 +83,9 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 				return;
 			}
 			// Checked before the editor sees the key, so the search key wins over Pi's own bindings.
-			if (matchesKey(data, options.searchKey)) {
-				openModal();
+			const configured = options.configured();
+			if (matchesKey(data, configured.searchKey)) {
+				openModal(configured);
 				return;
 			}
 			handleInput(data);

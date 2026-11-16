@@ -48,8 +48,13 @@ function resolveUserPath(path: string, cwd: string): string {
 }
 
 export interface HistorySource {
-	/** Records newest first, de-duplicated on their text. */
+	/** Records newest first, de-duplicated on their text, at most the record limit of them. */
 	load(context: SessionContext, signal?: AbortSignal): Promise<HistoryRecord[]>;
+}
+
+export interface HistorySourceOptions {
+	/** How many unique records, newest first, a load returns at most. */
+	recordLimit: number;
 }
 
 /**
@@ -57,7 +62,7 @@ export interface HistorySource {
  * Sessions are found through Pi's public session-listing API, so a custom session directory is
  * honoured. Session files are only ever read.
  */
-export function createHistorySource(): HistorySource {
+export function createHistorySource({ recordLimit }: HistorySourceOptions): HistorySource {
 	return {
 		async load(context, signal) {
 			const cwd = resolve(context.cwd);
@@ -68,7 +73,7 @@ export function createHistorySource(): HistorySource {
 				if (!session.cwd || resolve(session.cwd) !== cwd) continue;
 				occurrences.push(...(await readUserPrompts(session.path, session.cwd)));
 			}
-			return dedupeNewestFirst(occurrences);
+			return dedupeNewestFirst(occurrences).slice(0, recordLimit);
 		},
 	};
 }
