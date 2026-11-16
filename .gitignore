@@ -1,3 +1,13 @@
+# Dependencies and local agent state
 node_modules/
+.pi/
+
+# Nix outputs and generated git-hooks.nix configuration
+/result
+/result-*
+/.pre-commit-config.yaml
+
+# Test output, logs and OS metadata
+coverage/
 *.log
 .DS_Store

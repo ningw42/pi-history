@@ -1,6 +1,7 @@
 {
   "name": "pi-history",
   "version": "0.1.0",
+  "private": true,
   "description": "One history modal for Pi: Ctrl+R opens a Pi-drawn overlay of the prompts you typed before.",
   "type": "module",
   "keywords": [
@@ -17,11 +18,13 @@
     ]
   },
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.19"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "node --test --test-reporter=spec 'test/**/*.test.ts'"
+    "check": "npm run typecheck && npm test",
+    "release:check": "node scripts/check-node.mjs && node scripts/check-release.mjs",
+    "typecheck": "node scripts/check-node.mjs && tsc --noEmit",
+    "test": "node scripts/check-node.mjs && node --test --test-reporter=spec \"test/**/*.test.ts\""
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
