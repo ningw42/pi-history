@@ -8,11 +8,13 @@ Targets Pi **1.5.2** on Linux and macOS. It is a Pi package written in TypeScrip
 
 ## Status
 
-This is the bootstrap ([#2](https://github.com/ningw42/pi-history/issues/2)) of the design in [#1](https://github.com/ningw42/pi-history/issues/1). What works today:
+The bootstrap ([#2](https://github.com/ningw42/pi-history/issues/2)) and fuzzy search ([#3](https://github.com/ningw42/pi-history/issues/3)) of the design in [#1](https://github.com/ningw42/pi-history/issues/1) are done. What works today:
 
 - **Ctrl+R** in the input bar, at any cursor position, opens the history modal.
-- The modal lists the prompts you typed in sessions started in the **exact current working directory**, newest first, one row per unique prompt (its most recent use wins). Multi-line prompts are shown as one row.
-- **Up** moves to older records, **Down** back toward newer ones. The newest record starts selected and sits at the bottom of the list.
+- The modal lists the prompts you typed in sessions started in the **exact current working directory**, one row per unique prompt (its most recent use wins). Multi-line prompts are shown as one row.
+- The modal has a **query line**, which starts with whatever is in the input bar when you press Ctrl+R. Editing it never changes your draft. With an empty (or whitespace-only) query the list is newest first. With a query, the list is ranked by [**fzf**](https://github.com/junegunn/fzf): match quality first, recency second, so an old obvious match beats a recent weak one. fzf's search syntax works (several terms, `'exact`, `^prefix`, `suffix$`, `!negation`, `a | b`).
+- The best candidate starts selected and sits at the bottom of the list, next to the query line. **Up** moves to older (or lower-ranked) records, **Down** back toward newer (or higher-ranked) ones.
+- If nothing matches, the modal says so. If fzf is missing or fails, the modal shows why; clearing the query still browses newest first.
 - **Enter** replaces the whole draft with the selected record and puts the cursor at the end. Nothing is submitted.
 - **Escape** closes the modal and leaves the draft, cursor and collapsed pastes exactly as they were.
 - Confirm, cancel and list navigation follow your Pi keybindings (`tui.select.confirm`, `tui.select.cancel`, `tui.select.up`, `tui.select.down`).
@@ -24,7 +26,6 @@ The remaining sub-issues of #1, in order:
 
 | Issue | Adds |
 |---|---|
-| [#3](https://github.com/ningw42/pi-history/issues/3) | A query line seeded from the draft, and fuzzy ranking by `fzf` in filter mode (match quality first, recency second). |
 | [#4](https://github.com/ningw42/pi-history/issues/4) | An optional JSON configuration file in Pi's agent directory, and `sk` (skim) as an alternative matcher. |
 | [#5](https://github.com/ningw42/pi-history/issues/5) | **Repo** scope (the whole git repository) and **global** scope (every session), toggled with Ctrl+R inside the modal. |
 | [#6](https://github.com/ningw42/pi-history/issues/6) | The live session's prompts, a 5,000-record limit per scope, and an in-memory cache that re-reads only new or changed session files. |
@@ -34,6 +35,8 @@ The remaining sub-issues of #1, in order:
 | [#10](https://github.com/ningw42/pi-history/issues/10) | A smoke suite that drives the real Pi executable in a pseudo-terminal. |
 
 ## Install
+
+Searching needs [`fzf`](https://github.com/junegunn/fzf) on your `PATH` (any recent release; developed against 0.72 and 0.75). Without it the modal still browses newest first, and says that fzf is missing whenever there is a query (including one started from the draft).
 
 Install the latest `main` from Git (no npm publication or build needed):
 
@@ -60,7 +63,7 @@ pi install /path/to/pi-history  # or add it to your Pi settings
 - **Draft**: the text in Pi's input bar when an entry point fires.
 - **History record**: one unique user-typed prompt with the time and working directory of its most recent use.
 - **Scope**: which sessions records are drawn from (#5).
-- **Matcher**: the external program (`fzf` or `sk`) that filters and ranks records for a query (#3, #4).
+- **Matcher**: the external program that filters and ranks records for a query: `fzf` today, `sk` as an alternative in #4.
 - **Confirm / dismiss**: the two ways the modal closes, with a record or without changing anything.
 
 ### Modules
@@ -69,10 +72,11 @@ pi install /path/to/pi-history  # or add it to your Pi settings
 |---|---|---|
 | Entry point | `src/index.ts` | Wires the modules together; inert unless Pi is in TUI mode. |
 | Editor integration | `src/editor-integration.ts` | The only module that knows about Pi's editor. Wraps the input bar's editor to install the entry points, and applies a confirmed record to the draft. |
-| History modal | `src/history-modal.ts` | The overlay component. Owns loading state, records and selection; handles keys; renders. Resolves with "confirmed text" or "dismissed" and **never writes to the input bar**. |
+| History modal | `src/history-modal.ts` | The overlay component. Owns loading state, the query line, the result list and selection; handles keys; renders. Resolves with "confirmed text" or "dismissed" and **never writes to the input bar**. |
 | History source | `src/history-source.ts` | Returns history records newest first, de-duplicated, from Pi session files. |
+| Matcher adapter | `src/matcher.ts` | Given a query, newest-first records and a cancellation signal, returns the matching records ranked, or a typed failure. Hides process handling, the NUL-delimited transport, environment scrubbing and exit-status interpretation. |
 
-The matcher adapter (#3), configuration (#4) and skill restoration (#7) are the remaining modules of the design.
+Configuration (#4) and skill restoration (#7) are the remaining modules of the design.
 
 ### Decisions
 
@@ -84,10 +88,16 @@ The matcher adapter (#3), configuration (#4) and skill restoration (#7) are the 
 - **Keys that arrive while the modal is opening or closing belong to the modal.** Pi mounts the overlay asynchronously and gives focus back to the editor before the result arrives, so keys from the same terminal input batch (for example a fast Ctrl+R then Enter, or a double Enter) would otherwise reach the editor and submit the draft the modal is replacing.
 - **The session directory** is the current session's. An ephemeral (`--no-session`) session reports none, so the extension uses `PI_CODING_AGENT_SESSION_DIR` if set, else the `sessionDir` setting, else Pi's default directory. A `--session-dir` flag is not visible to extensions in an ephemeral session, so `--no-session --session-dir <dir>` does not read `<dir>`; to browse a custom directory's history in an ephemeral session, set `PI_CODING_AGENT_SESSION_DIR` or the `sessionDir` setting instead.
 - **Recalled text goes through Pi's editor**, which stores CRLF/CR as LF and tabs as four spaces, as it does for typed and pasted text. Text typed, pasted or edited in Pi's input bar never contains those characters, so only text stored without passing through the editor is affected: RPC and SDK prompts, extension input transforms, and expanded prompt templates or skills.
+- **The draft is the starting query, verbatim**, so fzf's search syntax applies to it: a draft that begins with `!` or `'`, or contains ` | `, is read as fzf operators. Two exceptions: the query line holds one line, so a multi-line draft's line breaks become spaces (fzf separates terms on whitespace anyway), and a collapsed paste counts with its content, not its `[paste #1 …]` marker. The query is one command-line argument, so a paste larger than the operating system allows for one (about 128 KiB on Linux) cannot be searched and shows "Search failed". A whitespace-only draft or query counts as empty: nothing to match, so no fzf process runs.
+- **The query line is Pi's own `Input` component**, so it edits like the rest of Pi and follows your editing keybindings. The draft is put into it as a bracketed paste, because `Input` has no public way to place the cursor and a paste leaves it at the end.
+- **fzf runs as a filter, never interactively**: `fzf --filter <query> --read0 --print0 --scheme=history`, started directly with an argument list (no shell), with records NUL-delimited on its standard input newest first, so multi-line prompts survive. The history scheme ranks by match quality and breaks ties by input order, which is recency; sorting is left on. Results are mapped back to records by text, which is unique after de-duplication. A record containing a NUL cannot be delimited and is never matched.
+- **Your fzf defaults cannot change the ranking**: `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` are removed from fzf's environment (`--no-sort` there would otherwise list results in recency order).
+- **Only the latest query's results are shown.** A query edit waits 50 ms, then starts one fzf run; any earlier run is killed and its output discarded, so a slow search never replaces a newer one. Closing the modal kills a running search. Until the new results arrive the previous list stays on screen but cannot be confirmed: Enter does nothing while the list is out of date, so typing a query and Enter in one input batch never confirms a record the query does not match. Each new list selects its best candidate.
+- **fzf's "no match" status (1) is a result, not an error**: the modal shows "No matches". A missing fzf is reported as not found; any other exit status, or fzf being killed by a signal, is reported with fzf's first line of error output. A query containing a NUL character (only possible by pasting one) cannot be passed to fzf and is reported too. There is no built-in fallback matcher.
 
 ## Development
 
-Development and CI require **Node 26.x** (`.node-version`) and npm. The major is selected explicitly, not through a moving `latest` alias; the Nix lockfile pins the development package's exact version. The committed `package-lock.json` is the authority for JavaScript dependencies.
+Development and CI require **Node 26.x** (`.node-version`), npm and **`fzf`** on `PATH`: the matcher adapter tests run the real fzf and fail, rather than skip, without it. The Nix shell provides fzf; CI installs it from each runner's package manager. The Node major is selected explicitly, not through a moving `latest` alias; the Nix lockfile pins the development package's exact version. The committed `package-lock.json` is the authority for JavaScript dependencies.
 
 ```sh
 npm ci --ignore-scripts
@@ -105,7 +115,7 @@ Installation scripts are deliberately disabled: this source-only extension needs
 ### Optional Nix shell and pre-commit hooks
 
 ```sh
-nix develop          # Node 26, Git, pre-commit, actionlint and nixfmt
+nix develop          # Node 26, fzf, Git, pre-commit, actionlint and nixfmt
 npm ci --ignore-scripts
 pre-commit run --all-files
 pre-commit install   # optional: enable checks on each commit
@@ -129,7 +139,7 @@ nix flake update     # explicitly refresh Nix inputs; review and commit flake.lo
 
 ### CI and releases
 
-Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux, macOS and Windows**, each with **Node 26**, read from `.node-version` (also used by the release job). The runners are `ubuntu-latest`, `macos-latest` and `windows-latest`, using their default architectures; Windows uses amd64/x64. Nix and workflow lint checks remain local only. Actions use explicit release tags (such as `v7.0.1`, not a floating major); Dependabot proposes monthly action updates. Tags are easier to read but can be moved upstream, unlike commit pins. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
+Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux, macOS and Windows**, each with **Node 26**, read from `.node-version` (also used by the release job), and with fzf installed through apt, Homebrew or Chocolatey. The runners are `ubuntu-latest`, `macos-latest` and `windows-latest`, using their default architectures; Windows uses amd64/x64. Nix and workflow lint checks remain local only. Actions use explicit release tags (such as `v7.0.1`, not a floating major); Dependabot proposes monthly action updates. Tags are easier to read but can be moved upstream, unlike commit pins. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
 
 Distribution remains Git-only: `package.json` is `private` to prevent accidental npm publication. Pi reads the existing `pi.extensions` entry point from the checkout and supplies the host packages declared as peers. There is no bundling, npm token, uploaded tarball or compiled release asset. GitHub provides its usual source archives.
 
@@ -153,8 +163,10 @@ For the first release, the existing `0.1.0` can be tagged after this setup is me
 
 ### Tests
 
-The tests load the real entry point against a fake Pi API and UI context, with Pi's real editor component (Pi's text-input component joins it with the query line in #3). The fake mirrors Pi's overlay lifecycle: the overlay is mounted asynchronously, and closing it gives focus back to the editor before the result arrives. History comes from synthetic session files in a temporary agent directory (`PI_CODING_AGENT_DIR`), so no real prompt history is read.
+The tests load the real entry point against a fake Pi API and UI context, with Pi's real editor and text-input components. The fake mirrors Pi's overlay lifecycle: the overlay is mounted asynchronously, and closing it gives focus back to the editor before the result arrives. History comes from synthetic session files in a temporary agent directory (`PI_CODING_AGENT_DIR`), so no real prompt history is read.
 
-Tests assert on what a user sees: the input bar's text and cursor, and the rendered overlay lines. The one allowed exception is a narrow set of safety checks at the extension's boundary with Pi, for behaviour that has no visible output: prompts handed to Pi for submission ("nothing is submitted"), what the extension registered or installed with Pi ("registers nothing outside TUI mode"), and the session files on disk ("never written"). Tests never assert on the extension's private state.
+Tests assert on what a user sees: the input bar's text and cursor, and the rendered overlay lines (the list rows and the query line). The one allowed exception is a narrow set of checks at the extension's external boundaries, for behaviour that has no visible output: prompts handed to Pi for submission ("nothing is submitted"), what the extension registered or installed with Pi ("registers nothing outside TUI mode"), the session files on disk ("never written"), and what the matcher process is given and whether it was killed. Tests never assert on the extension's private state.
 
-The harness (`test/harness.ts`) can also put a scripted stub matcher on `PATH` as `fzf` and `sk`, ready for #3 and #4. Windows uses `.cmd` launchers rather than Unix executable symlinks. The POSIX read-permission test is skipped on Windows (and for root); malformed-session coverage runs everywhere. CI exercises the extension-boundary suite, not the real Pi terminal executable, so the Windows job is not an interactive Windows smoke test.
+The harness (`test/harness.ts`) always puts a scripted stub matcher (`test/fixtures/stub-matcher.mjs`) on `PATH` as `fzf` and `sk`, so on Linux and macOS the extension-boundary tests never reach a real matcher. The stub records its arguments, environment and input, replies with scripted output, exit status, error output and delay, and records whether it outlived its delay (that is, was not killed). The matcher adapter is also tested on its own against the real fzf (`test/fzf-matcher.test.ts`): ranking on the fixture from the fuzzy-matching investigation, newest-first ties, search syntax and multi-line round trips. The 50 ms debounce has no test: runs it would save are killed before the stub starts, so it is not observable at the process boundary.
+
+On Windows the stub uses `.cmd` launchers, which Node will not start without a shell, and the extension never uses one: tests that need the stub to answer are skipped there, and tests that open the modal with a draft may start the fzf CI installs, without depending on its outcome. The POSIX read-permission test is skipped on Windows (and for root); malformed-session coverage runs everywhere. CI exercises the extension-boundary suite, not the real Pi terminal executable, so the Windows job is not an interactive Windows smoke test.

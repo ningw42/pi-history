@@ -27,6 +27,7 @@
             runtimeInputs = [
               pkgs.nodejs_26
               pkgs.git
+              pkgs.fzf
             ];
             text = "npm run check";
           };
@@ -56,6 +57,7 @@
             packages = [
               pkgs.nodejs_26
               pkgs.git
+              pkgs.fzf
             ]
             ++ devHooks.enabledPackages;
             shellHook = devHooks.shellHook + ''
