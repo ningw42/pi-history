@@ -4,15 +4,16 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { Harness, Keys, useHarness } from "./harness.ts";
-
-const T0 = Date.UTC(2026, 10, 1, 9, 0, 0);
-/** The timestamp `n` minutes after T0. */
-const minutesAfterT0 = (n: number) => T0 + n * 60_000;
+import { Harness, Keys, minutesAfterT0, useHarness } from "./harness.ts";
 
 /** The rendered overlay shows the history modal. */
 function assertModalShown(h: Harness): void {
 	assert.match(h.overlayLines()[0] ?? "", /History/);
+}
+
+/** Open the modal and clear the query the draft started it with, to browse every record newest first. */
+function openToBrowse(h: Harness): void {
+	h.press(Keys.ctrlR, Keys.clearLine);
 }
 
 /** No overlay is rendered. */
@@ -69,9 +70,9 @@ describe("Ctrl+R opens the history modal", () => {
 		await h.start();
 		h.press(Keys.ctrlR);
 		await h.flush();
-		assert.deepEqual(h.modalBody(), ["Loading history…"]);
+		assert.deepEqual(h.modalList(), ["Loading history…"]);
 		await h.loaded();
-		assert.deepEqual(h.modalBody(), ["› hello"]);
+		assert.deepEqual(h.modalList(), ["› hello"]);
 	});
 
 	test("an empty history says so", async (t) => {
@@ -79,7 +80,7 @@ describe("Ctrl+R opens the history modal", () => {
 		await h.start();
 		h.press(Keys.ctrlR);
 		await h.loaded();
-		assert.deepEqual(h.modalBody(), ["No history yet"]);
+		assert.deepEqual(h.modalList(), ["No history yet"]);
 	});
 });
 
@@ -101,7 +102,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["  oldest", "  middle", "› newest"]);
+		assert.deepEqual(h.modalList(), ["  oldest", "  middle", "› newest"]);
 	});
 
 	test("follow the working directory recorded in the session, not the storage directory name", async (t) => {
@@ -118,7 +119,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["› this project"]);
+		assert.deepEqual(h.modalList(), ["› this project"]);
 	});
 
 	test("skip empty and whitespace-only prompts", async (t) => {
@@ -136,7 +137,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["› kept"]);
+		assert.deepEqual(h.modalList(), ["› kept"]);
 	});
 
 	test("keep their text untrimmed", async (t) => {
@@ -167,7 +168,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["  between", "› repeated"]);
+		assert.deepEqual(h.modalList(), ["  between", "› repeated"]);
 	});
 
 	test("come from a custom session directory when Pi uses one", async (t) => {
@@ -179,7 +180,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["› from custom dir"]);
+		assert.deepEqual(h.modalList(), ["› from custom dir"]);
 	});
 
 	test("come from the sessionDir setting in an ephemeral (--no-session) session", async (t) => {
@@ -195,7 +196,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["› from custom dir"]);
+		assert.deepEqual(h.modalList(), ["› from custom dir"]);
 	});
 
 	test("come from PI_CODING_AGENT_SESSION_DIR, ahead of the setting, in an ephemeral session", async (t) => {
@@ -216,7 +217,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["› from env dir"]);
+		assert.deepEqual(h.modalList(), ["› from env dir"]);
 	});
 
 	test("still load when neighbouring session files are malformed", async (t) => {
@@ -232,7 +233,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["› valid prompt"]);
+		assert.deepEqual(h.modalList(), ["› valid prompt"]);
 	});
 
 	test("still load when a neighbouring session file is unreadable", {
@@ -248,7 +249,7 @@ describe("history records", () => {
 			await h.start();
 			h.press(Keys.ctrlR);
 			await h.loaded();
-			assert.deepEqual(h.modalBody(), ["› valid prompt"]);
+			assert.deepEqual(h.modalList(), ["› valid prompt"]);
 		} finally {
 			chmodSync(unreadable, 0o600);
 		}
@@ -262,7 +263,7 @@ describe("history records", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.deepEqual(h.modalBody(), ["› line one ↵ line two"]);
+		assert.deepEqual(h.modalList(), ["› line one ↵ line two"]);
 	});
 });
 
@@ -278,27 +279,27 @@ describe("selection", () => {
 
 	test("starts on the newest record", async (t) => {
 		const h = await openWithThree(t);
-		assert.deepEqual(h.modalBody(), ["  one", "  two", "› three"]);
+		assert.deepEqual(h.modalList(), ["  one", "  two", "› three"]);
 	});
 
 	test("Up moves to older records and stops at the oldest", async (t) => {
 		const h = await openWithThree(t);
 		h.press(Keys.up);
-		assert.deepEqual(h.modalBody(), ["  one", "› two", "  three"]);
+		assert.deepEqual(h.modalList(), ["  one", "› two", "  three"]);
 		h.press(Keys.up, Keys.up, Keys.up);
-		assert.deepEqual(h.modalBody(), ["› one", "  two", "  three"]);
+		assert.deepEqual(h.modalList(), ["› one", "  two", "  three"]);
 	});
 
 	test("Down moves back toward newer records and stops at the newest", async (t) => {
 		const h = await openWithThree(t);
 		h.press(Keys.up, Keys.up, Keys.down);
-		assert.deepEqual(h.modalBody(), ["  one", "› two", "  three"]);
+		assert.deepEqual(h.modalList(), ["  one", "› two", "  three"]);
 		h.press(Keys.down, Keys.down);
-		assert.deepEqual(h.modalBody(), ["  one", "  two", "› three"]);
+		assert.deepEqual(h.modalList(), ["  one", "  two", "› three"]);
 	});
 
 	test("scrolls when the selection moves past the visible rows", async (t) => {
-		const h = useHarness(t, { terminalRows: 13 }); // leaves room for 3 list rows
+		const h = useHarness(t, { terminalRows: 15 }); // leaves room for 3 list rows
 		h.writeSession({
 			cwd: h.cwd,
 			prompts: ["p1", "p2", "p3", "p4", "p5"].map((text, i) => ({ text, timestamp: minutesAfterT0(i) })),
@@ -306,13 +307,13 @@ describe("selection", () => {
 		await h.start();
 		h.press(Keys.ctrlR);
 		await h.loaded();
-		assert.deepEqual(h.modalBody(), ["  p3", "  p4", "› p5"]);
+		assert.deepEqual(h.modalList(), ["  p3", "  p4", "› p5"]);
 
 		h.press(Keys.up, Keys.up, Keys.up);
-		assert.deepEqual(h.modalBody(), ["› p2", "  p3", "  p4"]);
+		assert.deepEqual(h.modalList(), ["› p2", "  p3", "  p4"]);
 
 		h.press(Keys.up, Keys.down, Keys.down, Keys.down);
-		assert.deepEqual(h.modalBody(), ["  p2", "  p3", "› p4"]);
+		assert.deepEqual(h.modalList(), ["  p2", "  p3", "› p4"]);
 	});
 });
 
@@ -330,7 +331,7 @@ describe("confirming", () => {
 		h.type("draft to be replaced");
 		h.press(Keys.left, Keys.left);
 
-		h.press(Keys.ctrlR);
+		openToBrowse(h);
 		await h.loaded();
 		h.press(Keys.up, Keys.enter);
 		await h.flush();
@@ -351,7 +352,7 @@ describe("confirming", () => {
 		await h.start();
 		h.type("draft");
 
-		h.press(Keys.ctrlR);
+		openToBrowse(h);
 		await h.loaded();
 		h.press(Keys.enter);
 		await h.flush();
@@ -426,7 +427,7 @@ describe("confirming", () => {
 		h.writeSession({ cwd: h.cwd, prompts: [{ text: "recalled", timestamp: minutesAfterT0(1) }] });
 		await h.start();
 		h.type("draft that must not be submitted");
-		h.press(Keys.ctrlR);
+		openToBrowse(h);
 		await h.loaded();
 
 		h.press(Keys.enter, Keys.enter); // one batch: the second Enter reaches the editor before the result is applied
@@ -537,10 +538,10 @@ describe("keybindings", () => {
 		await h.start();
 		h.type("draft");
 
-		h.press(Keys.ctrlR);
+		openToBrowse(h);
 		await h.loaded();
 		h.press("\x0b", "\x0b", "\x0a"); // ctrl+k, ctrl+k, ctrl+j
-		assert.deepEqual(h.modalBody(), ["  one", "› two", "  three"]);
+		assert.deepEqual(h.modalList(), ["  one", "› two", "  three"]);
 		h.press(Keys.enter, Keys.escape); // default keys no longer confirm or cancel
 		await h.flush();
 		assertModalShown(h);
@@ -619,7 +620,7 @@ describe("test harness", () => {
 			h.press(Keys.ctrlR);
 			await h.loaded();
 
-			assert.deepEqual(h.modalBody(), ["› from custom dir"]);
+			assert.deepEqual(h.modalList(), ["› from custom dir"]);
 		} finally {
 			h.dispose();
 			assert.equal(process.env.PI_CODING_AGENT_SESSION_DIR, sentinel);

@@ -2,9 +2,11 @@ import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-a
 import { type EditorComponent, type KeyId, matchesKey } from "@earendil-works/pi-tui";
 import { HistoryModal, type ModalResult } from "./history-modal.ts";
 import type { HistorySource, SessionContext } from "./history-source.ts";
+import type { Matcher } from "./matcher.ts";
 
 export interface EditorIntegrationOptions {
 	historySource: HistorySource;
+	matcher: Matcher;
 	/** Where the sessions for the current directory live, resolved when the modal opens. */
 	sessionContext: () => SessionContext;
 	/** Key that opens the history modal while the input bar has focus. */
@@ -36,6 +38,8 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 		const openModal = () => {
 			const session: { modal?: HistoryModal } = {};
 			pending = session;
+			// The draft as the user wrote it: a collapsed paste counts with its content.
+			const draft = editor.getExpandedText?.() ?? editor.getText();
 			ctx.ui
 				.custom<ModalResult>(
 					(modalTui, modalTheme, modalKeybindings, done) => {
@@ -43,7 +47,9 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 							tui: modalTui,
 							theme: modalTheme,
 							keybindings: modalKeybindings,
+							draft,
 							loadRecords: (signal) => options.historySource.load(options.sessionContext(), signal),
+							matcher: options.matcher,
 							done,
 						});
 						return session.modal;

@@ -8,11 +8,20 @@
  * result promise settles.
  *
  * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
- * rendered overlay lines (`overlayLines()`, empty when no overlay is shown). The one allowed
- * exception is a narrow set of safety checks at the extension's boundary with Pi, for behaviour
- * that has no visible output: prompts handed to Pi for submission (`submissions`), what the
- * extension registered or installed (`registrations`, `editorFactoryInstalls`, `overlayRequests`,
- * `notifications`), and the session files on disk. Never assert on the extension's private state.
+ * rendered overlay lines (`overlayLines()`, `modalList()`, `modalQuery()`; empty when no overlay is
+ * shown), including whether the modal places the terminal cursor (`modalShowsCursor()`). Like Pi,
+ * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
+ * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
+ * boundaries, for behaviour that has no visible output: prompts handed to Pi for submission
+ * (`submissions`), what the extension registered or installed (`registrations`,
+ * `editorFactoryInstalls`, `overlayRequests`, `notifications`), the session files on disk, and what
+ * the matcher process was given and whether it was killed (`matcherCalls()`). Never assert on the
+ * extension's private state.
+ *
+ * A scripted stub is always on PATH as `fzf` and `sk`, so on Linux and macOS no harness test
+ * reaches a real matcher. On Windows the extension cannot start the stub's `.cmd` launcher: tests
+ * that need the stub's answers are skipped there, and a test that opens the modal with a draft may
+ * start whatever fzf is on PATH, without depending on its outcome.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,9 +35,11 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+	CURSOR_MARKER,
 	type Component,
 	type EditorComponent,
 	type EditorTheme,
+	type Focusable,
 	type KeybindingsConfig,
 	KeybindingsManager,
 	setKeybindings,
@@ -47,7 +58,13 @@ export const Keys = {
 	enter: "\r",
 	escape: "\x1b",
 	ctrlR: "\x12",
+	/** Ctrl+U, Pi's delete-to-line-start: clears a line whose cursor is at its end. */
+	clearLine: "\x15",
 } as const;
+
+const T0 = Date.UTC(2026, 10, 1, 9, 0, 0);
+/** A timestamp for synthetic prompts: `n` minutes after a fixed point in time. */
+export const minutesAfterT0 = (n: number) => T0 + n * 60_000;
 
 const STUB_MATCHER = fileURLToPath(new URL("./fixtures/stub-matcher.mjs", import.meta.url));
 
@@ -70,6 +87,10 @@ export interface StubMatcherResponse {
 	output?: string[];
 	exitCode?: number;
 	delayMs?: number;
+	/** Written to the stub's standard error before it exits. */
+	stderr?: string;
+	/** After its delay the stub ends by this signal instead of an exit status, writing nothing. */
+	signal?: NodeJS.Signals;
 }
 
 export interface HarnessOptions {
@@ -85,7 +106,7 @@ export interface HarnessOptions {
 	/** User keybinding overrides, as in Pi's keybindings.json. */
 	keybindings?: KeybindingsConfig;
 	terminalRows?: number;
-	/** Put a scripted stub on PATH as both `fzf` and `sk`. */
+	/** Scripted responses for the stub that is always put on PATH as both `fzf` and `sk`. */
 	stubMatcher?: { responses?: StubMatcherResponse[] };
 }
 
@@ -93,6 +114,8 @@ export interface StubMatcherCall {
 	argv: string[];
 	env: Record<string, string>;
 	input: string[];
+	/** The stub outlived its scripted delay: it was not killed first. */
+	finished: boolean;
 }
 
 interface OverlayRequest {
@@ -138,7 +161,7 @@ export class Harness {
 		// Pi's session-directory override must not leak in from the host: it would point the
 		// extension at real history. Tests that need it set it explicitly with setEnv().
 		this.setEnv("PI_CODING_AGENT_SESSION_DIR", undefined);
-		if (options.stubMatcher) this.installStubMatcher(options.stubMatcher);
+		this.installStubMatcher(options.stubMatcher ?? {});
 
 		initTheme("dark", false);
 		this.keybindings = new KeybindingsManager(TUI_KEYBINDINGS, options.keybindings ?? {});
@@ -238,11 +261,35 @@ export class Harness {
 		return this.overlay?.component.render(width).map((line) => stripAnsi(line).trimEnd()) ?? [];
 	}
 
-	/** Rendered rows inside the overlay's frame, without frame characters. */
-	modalBody(width = 80): string[] {
-		return this.overlayLines(width)
-			.slice(1, -1)
-			.map((line) => line.replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd());
+	/** Rendered rows of the modal's list area (above the query line), without frame characters. */
+	modalList(width = 80): string[] {
+		return this.modalSections(width).list;
+	}
+
+	/** The modal's query line as rendered, without frame characters; undefined when no modal is shown. */
+	modalQuery(width = 80): string | undefined {
+		return this.modalSections(width).query;
+	}
+
+	/** Whether the rendered modal places the terminal cursor (Pi's cursor marker), as on a focused text input. */
+	modalShowsCursor(width = 80): boolean {
+		return this.overlay?.component.render(width).some((line) => line.includes(CURSOR_MARKER)) ?? false;
+	}
+
+	/** Move Pi's focus off the shown overlay (as when another component takes it) or back onto it. */
+	setOverlayFocus(focused: boolean): void {
+		if (!this.overlay) throw new Error("no overlay is shown");
+		setFocused(this.overlay.component, focused);
+	}
+
+	/** The overlay frame's rows, split at the rule above the query line. */
+	private modalSections(width: number): { list: string[]; query: string | undefined } {
+		const lines = this.overlayLines(width);
+		if (lines.length === 0) return { list: [], query: undefined };
+		const rule = lines.findIndex((line) => line.startsWith("├"));
+		if (rule === -1) throw new Error(`no query line in the rendered modal:\n${lines.join("\n")}`);
+		const inner = (line: string) => line.replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd();
+		return { list: lines.slice(1, rule).map(inner), query: lines.slice(rule + 1, -1).map(inner).join("\n") };
 	}
 
 	/** Let pending promise callbacks run (a confirmed record is applied once the overlay resolves). */
@@ -267,13 +314,24 @@ export class Harness {
 		}, "history to load");
 	}
 
+	/** Every stub matcher invocation so far, in start order. */
 	matcherCalls(): StubMatcherCall[] {
 		if (!existsSync(this.matcherLog)) return [];
-		return readFileSync(this.matcherLog, "utf8")
-			.trim()
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as StubMatcherCall);
+		const calls = new Map<number, StubMatcherCall>();
+		for (const line of readFileSync(this.matcherLog, "utf8").split("\n")) {
+			if (!line) continue;
+			const { pid, finished, ...started } = JSON.parse(line) as Omit<StubMatcherCall, "finished"> & {
+				pid: number;
+				finished?: true;
+			};
+			if (finished) {
+				const call = calls.get(pid);
+				if (call) call.finished = true;
+			} else {
+				calls.set(pid, { ...started, finished: false });
+			}
+		}
+		return [...calls.values()];
 	}
 
 	dispose(): void {
@@ -369,7 +427,10 @@ export class Harness {
 					const done = (result: T) => {
 						if (closed) return;
 						closed = true;
-						if (request && this.overlay === request) this.overlay = undefined;
+						if (request && this.overlay === request) {
+							this.overlay = undefined;
+							setFocused(request.component, false);
+						}
 						request?.component.dispose?.();
 						resolve(result);
 					};
@@ -377,7 +438,9 @@ export class Harness {
 					request = { component, options };
 					this.overlayRequests.push(request);
 					void Promise.resolve().then(() => {
-						if (!closed) this.overlay = request;
+						if (closed) return;
+						this.overlay = request;
+						setFocused(component, true);
 					});
 				}),
 			setEditorText: () => {
@@ -395,6 +458,11 @@ export class Harness {
 			},
 		} as unknown as ExtensionContext;
 	}
+}
+
+/** Mirrors Pi's TUI.setFocus: a component with a `focused` property is told when it gains or loses focus. */
+function setFocused(component: Component, focused: boolean): void {
+	if ("focused" in component) (component as Component & Focusable).focused = focused;
 }
 
 /** Pi's default per-cwd session directory under the agent directory. */

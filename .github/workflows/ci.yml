@@ -25,5 +25,15 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      # The matcher adapter tests run the real fzf and fail without it.
+      - name: Install fzf
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get update && sudo apt-get install -y fzf ;;
+            macOS) brew install fzf ;;
+            Windows) choco install fzf -y --no-progress ;;
+          esac
+          fzf --version
       - run: npm ci --ignore-scripts
       - run: npm run check
