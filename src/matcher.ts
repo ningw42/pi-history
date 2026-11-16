@@ -45,10 +45,12 @@ const STDERR_LIMIT = 4096;
  * - fzf: the history scheme.
  * - sk: tiebreak on score, then index. Never skim's history scheme: it ranks input order ahead of
  *   match quality.
+ * The query is attached to `--filter=`, so one starting with `-` stays the filter's value: as a
+ * separate argument, sk reads `-foo` as an option and fails.
  */
 const FILTER_ARGUMENTS: Record<MatcherName, (query: string) => string[]> = {
-	fzf: (query) => ["--filter", query, "--read0", "--print0", "--scheme=history"],
-	sk: (query) => ["--filter", query, "--read0", "--print0", "--tiebreak=score,index"],
+	fzf: (query) => [`--filter=${query}`, "--read0", "--print0", "--scheme=history"],
+	sk: (query) => [`--filter=${query}`, "--read0", "--print0", "--tiebreak=score,index"],
 };
 
 /** fzf or sk in non-interactive filter mode. */

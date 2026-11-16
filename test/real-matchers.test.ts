@@ -82,6 +82,12 @@ for (const name of ["fzf", "sk"] as const satisfies readonly MatcherName[]) {
 			assert.deepEqual([...ranked].sort(), [...records].sort());
 		});
 
+		test("treats a query starting with '-' or '=' as a search term, not an option", async () => {
+			assert.deepEqual(await match("-foo", ["bar", "-foo"]), ["-foo"]);
+			assert.deepEqual(await match("--read0", ["bar", "--read0 flag"]), ["--read0 flag"]);
+			assert.deepEqual(await match("=foo", ["bar", "=foo"]), ["=foo"]);
+		});
+
 		test("a query that matches nothing yields no matches, not a failure", async () => {
 			assert.deepEqual(await match("zzzz", INVESTIGATION_FIXTURE), []);
 		});

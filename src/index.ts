@@ -1,4 +1,4 @@
-import { type ExtensionAPI, type ExtensionContext, getAgentDir, type SessionStartEvent } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
 import { type ConfiguredParts, installEditorIntegration } from "./editor-integration.ts";
 import { createHistorySource, sessionContextOf } from "./history-source.ts";
@@ -12,7 +12,7 @@ import { createMatcher } from "./matcher.ts";
  * afterwards in the same synchronous step, so it is in place before any key reaches the editor.
  */
 export default function piHistory(pi: ExtensionAPI): void {
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		let configured!: ConfiguredParts;
 		installEditorIntegration(ctx, {
@@ -25,7 +25,7 @@ export default function piHistory(pi: ExtensionAPI): void {
 			matcher: createMatcher({ name: config.matcher, command: config.matcherCommand }),
 			searchKey: config.searchKey,
 		};
-		reportConfigProblem(ctx, problem, event.reason);
+		reportConfigProblem(ctx, problem);
 	});
 }
 
@@ -34,12 +34,12 @@ const REPORTED_PROBLEM = Symbol.for("pi-history.reportedConfigProblem");
 
 /**
  * Tell the user about a configuration problem once. Pi loads the extension afresh, re-importing its
- * module, at every session start, so only process-wide state remembers what was already reported.
- * A problem is reported when it is new or has changed, and again on `/reload`, the command that
- * applies configuration changes; not on `/new`, `/resume` or `/fork`.
+ * module, at every session start (`/new`, `/resume`, `/fork` and `/reload` included), so only
+ * process-wide state remembers what was already reported. A problem is reported when it is new or
+ * has changed; fixing the file forgets it, so making the same mistake again is reported again.
  */
-function reportConfigProblem(ctx: ExtensionContext, problem: string | undefined, reason: SessionStartEvent["reason"]): void {
+function reportConfigProblem(ctx: ExtensionContext, problem: string | undefined): void {
 	const processState = globalThis as typeof globalThis & { [REPORTED_PROBLEM]?: string };
-	if (problem && (reason === "reload" || problem !== processState[REPORTED_PROBLEM])) ctx.ui.notify(problem, "warning");
+	if (problem && problem !== processState[REPORTED_PROBLEM]) ctx.ui.notify(problem, "warning");
 	processState[REPORTED_PROBLEM] = problem;
 }

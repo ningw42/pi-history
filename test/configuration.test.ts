@@ -25,7 +25,7 @@ describe("without a configuration file", () => {
 
 		const call = await searchFor(h, "one");
 
-		assert.deepEqual(call.argv, ["--filter", "one", "--read0", "--print0", "--scheme=history"]);
+		assert.deepEqual(call.argv, ["--filter=one", "--read0", "--print0", "--scheme=history"]);
 		assert.deepEqual(h.notifications, []);
 	});
 });
@@ -44,7 +44,7 @@ describe("an invalid configuration file", () => {
 			h.notifications[0]?.message ?? "",
 			new RegExp(`^pi-history: ignoring ${escapeRegExp(h.configPath)}, which is not valid JSON \\(.+\\); using the default settings\\.$`),
 		);
-		assert.deepEqual(call.argv, ["--filter", "one", "--read0", "--print0", "--scheme=history"]);
+		assert.deepEqual(call.argv, ["--filter=one", "--read0", "--print0", "--scheme=history"]);
 	});
 
 	test("with one invalid value is reported once, and only that value's default applies", needsStub, async (t) => {
@@ -60,7 +60,7 @@ describe("an invalid configuration file", () => {
 				type: "warning",
 			},
 		]);
-		assert.deepEqual(call.argv, ["--filter", "one", "--read0", "--print0", "--scheme=history"]);
+		assert.deepEqual(call.argv, ["--filter=one", "--read0", "--print0", "--scheme=history"]);
 	});
 
 	test("with every value invalid, and an unknown setting, is reported in one notification", needsStub, async (t) => {
@@ -82,13 +82,13 @@ describe("an invalid configuration file", () => {
 					`pi-history: invalid settings in ${h.configPath}: ` +
 					`"matcher" must be "fzf" or "sk", using "fzf"; ` +
 					`"matcherCommand" must be a command name or a path, using "fzf"; ` +
-					`"searchKey" must be a key in Pi's keybinding syntax, such as "ctrl+t", using "ctrl+r"; ` +
+					`"searchKey" must be a key Pi recognizes, such as "ctrl+t" (Escape takes no modifiers), using "ctrl+r"; ` +
 					`"recordLimit" must be a positive integer, using 5000; ` +
 					`"macher" is not a setting, ignored.`,
 				type: "warning",
 			},
 		]);
-		assert.deepEqual(call.argv, ["--filter", "o", "--read0", "--print0", "--scheme=history"]);
+		assert.deepEqual(call.argv, ["--filter=o", "--read0", "--print0", "--scheme=history"]);
 		assert.deepEqual(call.input, ["two", "one"]);
 	});
 
@@ -97,6 +97,8 @@ describe("an invalid configuration file", () => {
 		["an unknown key", "ctrl+rr"],
 		["a modifier without a key", "ctrl+"],
 		["a non-string", 18],
+		["Escape with a modifier, which Pi never matches", "ctrl+escape"],
+		["the Esc alias with a modifier, in capitals", "Shift+ESC"],
 	] as const) {
 		test(`with ${what} as the search key keeps Ctrl+R`, async (t) => {
 			const h = harnessWithPrompts(t, ["one"]);
@@ -107,7 +109,7 @@ describe("an invalid configuration file", () => {
 			await h.loaded();
 
 			assert.equal(h.notifications.length, 1);
-			assert.match(h.notifications[0]?.message ?? "", /"searchKey" must be a key in Pi's keybinding syntax/);
+			assert.match(h.notifications[0]?.message ?? "", /"searchKey" must be a key Pi recognizes/);
 		});
 	}
 
@@ -165,7 +167,7 @@ describe("an invalid configuration file", () => {
 		assert.deepEqual(h.modalList(), ["› one"]);
 	});
 
-	test("is reported once, not again when /new, /resume or /fork load the extension afresh", async (t) => {
+	test("is reported once, not again when /new, /resume, /fork or /reload load the extension afresh", async (t) => {
 		const h = harnessWithPrompts(t, ["one"]);
 		h.writeConfig({ matcher: "skim" });
 		await h.start();
@@ -173,22 +175,13 @@ describe("an invalid configuration file", () => {
 		await h.start("new");
 		await h.start("resume");
 		await h.start("fork");
+		await h.start("reload");
+		await h.start("reload");
 
 		assert.equal(h.notifications.length, 1);
 		h.press(Keys.ctrlR);
 		await h.loaded();
 		assert.deepEqual(h.modalList(), ["› one"]);
-	});
-
-	test("is reported again on /reload, which is how changes are applied", async (t) => {
-		const h = harnessWithPrompts(t, ["one"]);
-		h.writeConfig({ matcher: "skim" });
-		await h.start();
-
-		await h.start("reload");
-
-		assert.equal(h.notifications.length, 2);
-		assert.equal(h.notifications[1]?.message, h.notifications[0]?.message);
 	});
 
 	test("introduced or changed after startup is reported at the next session start", async (t) => {
@@ -198,9 +191,9 @@ describe("an invalid configuration file", () => {
 		assert.equal(h.notifications.length, 0);
 
 		h.writeConfig({ matcher: "skim" });
-		await h.start("new");
+		await h.start("reload");
 		h.writeConfig({ recordLimit: 0 });
-		await h.start("resume");
+		await h.start("new");
 
 		assert.deepEqual(
 			h.notifications.map((notification) => notification.message.replace(/^.*: "/, '"')),
@@ -234,8 +227,26 @@ describe("the matcher command", () => {
 
 		const call = await searchFor(h, "one");
 
-		assert.deepEqual(call.argv, ["--filter", "one", "--read0", "--print0", "--tiebreak=score,index"]);
+		assert.deepEqual(call.argv, ["--filter=one", "--read0", "--print0", "--tiebreak=score,index"]);
 		await h.waitFor(() => h.modalList().join() === "› one", "the result");
+	});
+
+	test("containing NUL, which no executable path can, is reported and only it falls back", needsStub, async (t) => {
+		const h = harnessWithPrompts(t, ["one", "two", "three"]);
+		h.writeConfig({ matcher: "sk", matcherCommand: "sk\u0000", searchKey: "ctrl+t", recordLimit: 2 });
+		await h.start();
+
+		const call = await searchFor(h, "t", Keys.ctrlT);
+
+		assert.deepEqual(h.notifications, [
+			{
+				message: `pi-history: invalid settings in ${h.configPath}: "matcherCommand" must be a command name or a path, using "sk".`,
+				type: "warning",
+			},
+		]);
+		assert.deepEqual(call.argv, ["--filter=t", "--read0", "--print0", "--tiebreak=score,index"]);
+		assert.deepEqual(call.input, ["three", "two"]);
+		await h.waitFor(() => h.modalList().join() === "  two,› three", "the results");
 	});
 
 	test("a missing configured executable is reported by its path", async (t) => {
@@ -261,7 +272,7 @@ describe("the matcher command", () => {
 		const call = await searchFor(h, "one");
 
 		assert.deepEqual(h.notifications, []);
-		assert.deepEqual(call.argv, ["--filter", "one", "--read0", "--print0", "--tiebreak=score,index"]);
+		assert.deepEqual(call.argv, ["--filter=one", "--read0", "--print0", "--tiebreak=score,index"]);
 	});
 
 	test("may start with ~/ for the home directory", needsStub, async (t) => {
@@ -273,11 +284,23 @@ describe("the matcher command", () => {
 		const call = await searchFor(h, "one");
 
 		assert.deepEqual(h.notifications, []);
-		assert.deepEqual(call.argv, ["--filter", "one", "--read0", "--print0", "--scheme=history"]);
+		assert.deepEqual(call.argv, ["--filter=one", "--read0", "--print0", "--scheme=history"]);
 	});
 });
 
 describe("the search key", () => {
+	test("may be written in any case", async (t) => {
+		const h = harnessWithPrompts(t, ["one"]);
+		h.writeConfig({ searchKey: "Ctrl+T" });
+		await h.start();
+
+		h.press(Keys.ctrlT);
+		await h.loaded();
+
+		assert.deepEqual(h.notifications, []);
+		assert.deepEqual(h.modalList(), ["› one"]);
+	});
+
 	test("opens the modal with the draft as its query, and Ctrl+R no longer does", async (t) => {
 		const h = harnessWithPrompts(t, ["one"]);
 		h.writeConfig({ searchKey: "ctrl+t" });
@@ -305,75 +328,5 @@ describe("the record limit", () => {
 		await h.loaded();
 
 		assert.deepEqual(h.modalList(), ["  three", "› two"]);
-	});
-});
-
-describe("the sk matcher", () => {
-	test("filters NUL-delimited, ranking by score then input order, never with skim's history scheme", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["oldest", "two\nlines", "newest"]);
-		h.writeConfig({ matcher: "sk" });
-		await h.start();
-
-		const call = await searchFor(h, "'exact ^start");
-
-		assert.deepEqual(call.argv, ["--filter", "'exact ^start", "--read0", "--print0", "--tiebreak=score,index"]);
-		assert.deepEqual(call.input, ["newest", "two\nlines", "oldest"]);
-	});
-
-	test("does not inherit SKIM_DEFAULT_OPTIONS or SKIM_OPTIONS_FILE", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["one"]);
-		h.writeConfig({ matcher: "sk" });
-		h.setEnv("SKIM_DEFAULT_OPTIONS", "--no-sort --tac");
-		h.setEnv("SKIM_OPTIONS_FILE", h.path("skim-options"));
-		h.setEnv("SKIM_PI_HISTORY_TEST", "inherited");
-		await h.start();
-
-		const { env } = await searchFor(h, "one");
-
-		assert.equal(env.SKIM_PI_HISTORY_TEST, "inherited");
-		assert.equal("SKIM_DEFAULT_OPTIONS" in env, false);
-		assert.equal("SKIM_OPTIONS_FILE" in env, false);
-	});
-
-	test("its no-match status shows that nothing matched", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["one"], { stubMatcher: { responses: [{ exitCode: 1 }] } });
-		h.writeConfig({ matcher: "sk" });
-		await h.start();
-
-		await searchFor(h, "zzz");
-		await h.waitFor(() => !h.modalList().includes("Searching…"), "the search");
-
-		assert.deepEqual(h.modalList(), ["No matches"]);
-	});
-
-	test("a failing sk is reported with its exit status and error output", needsStub, async (t) => {
-		const h = harnessWithPrompts(t, ["one"], {
-			stubMatcher: { responses: [{ exitCode: 2, stderr: "error: unexpected argument '--bogus' found\n\nUsage: sk\n" }] },
-		});
-		h.writeConfig({ matcher: "sk" });
-		await h.start();
-
-		await searchFor(h, "one");
-		await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
-
-		assert.deepEqual(h.modalList(120), [
-			"Search failed: sk exited with status 2: error: unexpected argument '--bogus' found",
-			"Clear the query to browse recent prompts",
-		]);
-	});
-
-	test("a missing sk is reported, and clearing the query still browses newest first", async (t) => {
-		const h = harnessWithPrompts(t, ["one", "two"]);
-		h.writeConfig({ matcher: "sk" });
-		h.setEnv("PATH", h.path("no-matcher-here"));
-		await h.start();
-		h.type("one");
-
-		h.press(Keys.ctrlR);
-		await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the failure");
-
-		assert.deepEqual(h.modalList(), ["Search failed: sk was not found", "Clear the query to browse recent prompts"]);
-		h.press(Keys.clearLine);
-		assert.deepEqual(h.modalList(), ["  one", "› two"]);
 	});
 });

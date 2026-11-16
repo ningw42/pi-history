@@ -85,7 +85,7 @@ function settingsFrom(file: Record<string, unknown>, agentDir: string, problems:
 		searchKey: setting(
 			"searchKey",
 			(value) => (isKeyId(value) ? value : undefined),
-			'must be a key in Pi\'s keybinding syntax, such as "ctrl+t"',
+			'must be a key Pi recognizes, such as "ctrl+t" (Escape takes no modifiers)',
 			DEFAULT_SEARCH_KEY,
 		),
 		recordLimit: setting(
@@ -105,9 +105,10 @@ function settingsFrom(file: Record<string, unknown>, agentDir: string, problems:
  * A matcher command: a bare name, left to be looked up on PATH, or a path. A leading `~/` means the
  * home directory, and any other relative path is relative to the agent directory, which holds the
  * configuration file (and Pi's own `bin` directory), not to the directory Pi happened to start in.
+ * No path can contain NUL. Whether the executable exists is left to the matcher run to report.
  */
 function commandOf(value: unknown, agentDir: string): string | undefined {
-	if (typeof value !== "string" || value === "") return undefined;
+	if (typeof value !== "string" || value === "" || value.includes("\0")) return undefined;
 	if (value.startsWith("~/")) return join(homedir(), value.slice(2));
 	if (isAbsolute(value) || !/[/\\]/.test(value)) return value;
 	return resolve(agentDir, value);
@@ -123,7 +124,13 @@ const BASE_KEYS = new Set([
 	...Array.from({ length: 12 }, (_, i) => `f${i + 1}`),
 ]);
 
-/** Whether `value` is a key in Pi's keybinding syntax: modifiers, each at most once, then a base key. */
+/** Escape and its alias, which Pi's key matching never recognizes with any modifier. */
+const UNMODIFIABLE_KEYS = new Set(["escape", "esc"]);
+
+/**
+ * Whether `value` is a key Pi can recognize: in Pi's keybinding syntax (modifiers, each at most
+ * once, then a base key), and not a combination Pi's key matching rejects outright.
+ */
 function isKeyId(value: unknown): value is KeyId {
 	if (typeof value !== "string") return false;
 	let key = value.toLowerCase();
@@ -135,7 +142,7 @@ function isKeyId(value: unknown): value is KeyId {
 		used.add(modifier);
 		key = key.slice(modifier.length + 1);
 	}
-	return BASE_KEYS.has(key);
+	return BASE_KEYS.has(key) && !(used.size > 0 && UNMODIFIABLE_KEYS.has(key));
 }
 
 function errorMessage(error: unknown): string {
