@@ -2,8 +2,7 @@
 node_modules/
 .pi/
 
-# Nix / direnv and generated git-hooks.nix configuration
-.direnv/
+# Nix outputs and generated git-hooks.nix configuration
 /result
 /result-*
 /.pre-commit-config.yaml

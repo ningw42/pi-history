@@ -107,7 +107,7 @@ pre-commit run --all-files
 pre-commit install   # optional: enable checks on each commit
 ```
 
-With direnv and nix-direnv installed, `direnv allow` uses `.envrc` to enter the same shell. Entering it generates the ignored `.pre-commit-config.yaml` link; it does **not** install npm dependencies or modify Git hooks. The upstream automatic installer is disabled because it rewrites `core.hooksPath`. `pre-commit install` explicitly opts in; it refuses a custom `core.hooksPath` and preserves an existing pre-commit hook in migration mode. Use `pre-commit uninstall` to opt out.
+Entering `nix develop` generates the ignored `.pre-commit-config.yaml` link; it does **not** install npm dependencies or modify Git hooks. The upstream automatic installer is disabled because it rewrites `core.hooksPath`. `pre-commit install` explicitly opts in; it refuses a custom `core.hooksPath` and preserves an existing pre-commit hook in migration mode. Use `pre-commit uninstall` to opt out.
 
 The installed hook uses Nix store paths, so commits can also be made from outside the shell. Run `nix develop` again after updating the flake. If garbage collection removes the tools, remove the generated `.pre-commit-config.yaml` link, re-enter the shell and reinstall the hook. The shell leaves an unrelated pre-commit configuration untouched.
 
@@ -121,7 +121,7 @@ nix flake check      # sandboxed Nix formatting and GitHub Actions lint checks
 nix flake update     # explicitly refresh Nix inputs; review and commit flake.lock
 ```
 
-The sandboxed flake check excludes npm checks because it has neither network access nor `node_modules`; CI runs those separately with `npm ci`. Local `.pi/` agent state, `.direnv/`, generated hook configuration and Nix result links are ignored.
+The sandboxed flake check excludes npm checks because it has neither network access nor `node_modules`; CI runs those separately with `npm ci`. Local `.pi/` agent state, generated hook configuration and Nix result links are ignored.
 
 ### CI and releases
 
