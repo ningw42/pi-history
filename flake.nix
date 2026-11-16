@@ -25,7 +25,7 @@
           npmCheck = pkgs.writeShellApplication {
             name = "pi-history-check";
             runtimeInputs = [
-              pkgs.nodejs_24
+              pkgs.nodejs_26
               pkgs.git
             ];
             text = "npm run check";
@@ -54,7 +54,7 @@
           checks.pre-commit = mkHooks false;
           devShell = pkgs.mkShellNoCC {
             packages = [
-              pkgs.nodejs_24
+              pkgs.nodejs_26
               pkgs.git
             ]
             ++ devHooks.enabledPackages;

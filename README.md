@@ -87,7 +87,7 @@ The matcher adapter (#3), configuration (#4) and skill restoration (#7) are the 
 
 ## Development
 
-Use **Node 24** (`.node-version`) and npm. Node 22.19 is the minimum supported version, matching Pi 1.5.2's requirement. The committed `package-lock.json` is the authority for JavaScript dependencies.
+Development and CI require **Node 26.x** (`.node-version`) and npm. The major is selected explicitly, not through a moving `latest` alias; the Nix lockfile pins the development package's exact version. The committed `package-lock.json` is the authority for JavaScript dependencies.
 
 ```sh
 npm ci --ignore-scripts
@@ -96,12 +96,16 @@ npm run typecheck   # tsc, no emit
 npm test            # node:test, using Node's built-in TypeScript support
 ```
 
-Installation scripts are deliberately disabled: this source-only extension needs no build, and its development dependencies work without lifecycle scripts. `npm run check` still runs normally. No `prepare` hook modifies a consumer's checkout or requires Nix.
+`npm run check`, `npm run typecheck`, `npm test` and `npm run release:check` reject runtimes other than stable Node 26.x, with instructions to enter `nix develop` or select Node 26. The guard runs inside the commands, not through pre/post lifecycle hooks, so `--ignore-scripts` does not bypass it.
+
+This is a **development policy**, not a restriction on Pi's runtime. The extension still loads inside whichever runtime runs Pi, including Bun; there is no Node 26 check in extension code. The existing `engines.node >=22.19` compatibility declaration is unchanged. CI tests Node 26 only; Bun and older Node runtimes are not verified by this suite.
+
+Installation scripts are deliberately disabled: this source-only extension needs no build, and its development dependencies work without lifecycle scripts. No `devEngines`, `engine-strict`, `preinstall` or `prepare` gate imposes Node 26 on Pi's Git-package installation; dependency installation itself is intentionally not subject to the development guard.
 
 ### Optional Nix shell and pre-commit hooks
 
 ```sh
-nix develop          # Node 24, Git, pre-commit, actionlint and nixfmt
+nix develop          # Node 26, Git, pre-commit, actionlint and nixfmt
 npm ci --ignore-scripts
 pre-commit run --all-files
 pre-commit install   # optional: enable checks on each commit
@@ -125,7 +129,7 @@ The sandboxed flake check excludes npm checks because it has neither network acc
 
 ### CI and releases
 
-Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux and macOS**, each with **Node 22.19 and 24**, plus the sandboxed flake/workflow checks on Linux. Actions are pinned to commits; Dependabot proposes monthly action updates. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
+Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux and macOS**, each with **Node 26**, read from `.node-version` (also used by the release job), plus the sandboxed flake/workflow checks on Linux. Actions are pinned to commits; Dependabot proposes monthly action updates. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
 
 Distribution remains Git-only: `package.json` is `private` to prevent accidental npm publication. Pi reads the existing `pi.extensions` entry point from the checkout and supplies the host packages declared as peers. There is no bundling, npm token, uploaded tarball or compiled release asset. GitHub provides its usual source archives.
 
