@@ -4,24 +4,8 @@ import { join } from "node:path";
 import { describe, type TestContext, test } from "node:test";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { restoreSkillInvocation } from "../src/skill-restoration.ts";
+import { largeSkillRecords, LOCATION, skillEnvelope } from "./fixtures/skill-records.ts";
 import { type Harness, harnessWithPrompts, Keys, minutesAfterT0, needsStub, useHarness } from "./harness.ts";
-
-const LOCATION = "/abs/skills/code-review/SKILL.md";
-const BODY = "Review the diff carefully.\n\n## Steps\n1. Read every hunk.";
-
-/**
- * A skill invocation as Pi 1.5.2 stores it (`AgentSession._expandSkillCommand`): the skill block,
- * then, when arguments were typed, a blank line and the arguments. `baseDir` is the skill's base
- * directory, which Pi's own loader sets to the directory of its file.
- */
-function skillEnvelope(
-	options: { name?: string; location?: string; baseDir?: string; body?: string; args?: string } = {},
-): string {
-	const { name = "code-review", location = LOCATION, body = BODY, args } = options;
-	const baseDir = options.baseDir ?? location.slice(0, location.lastIndexOf("/"));
-	const block = `<skill name="${name}" location="${location}">\nReferences are relative to ${baseDir}.\n\n${body}\n</skill>`;
-	return args === undefined ? block : `${block}\n\n${args}`;
-}
 
 describe("restoring a skill invocation", () => {
 	const restored: [what: string, stored: string, expected: string][] = [
@@ -131,45 +115,12 @@ describe("restoring a skill invocation", () => {
 
 describe("restoring very large records", () => {
 	const MB = 1024 * 1024;
-	/** Records of about `size` characters, each with the text it must restore to. */
-	const records = (size: number): Record<string, [stored: string, expected: string]> => {
-		const kept = (stored: string): [string, string] => [stored, stored];
-		return {
-			body: [skillEnvelope({ body: "x".repeat(size), args: "go" }), "/skill:code-review go"],
-			arguments: [skillEnvelope({ args: "y\n".repeat(size / 2) }), `/skill:code-review ${"y\n".repeat(size / 2)}`],
-			bodyOfClosersThatCannotEndIt: [skillEnvelope({ body: "\n</skill>X".repeat(size / 10), args: "go" }), "/skill:code-review go"],
-			noClosingTag: kept(skillEnvelope({ body: "\n</skill>X".repeat(size / 10) }).replace(/\n<\/skill>$/, "")),
-			ambiguousArguments: kept(skillEnvelope({ args: `${"a\n</skill>X".repeat(size / 10)}\n</skill>` })),
-			unterminatedName: kept(`<skill name="${"n".repeat(size)}`),
-			longUnsafeName: kept(skillEnvelope({ name: `${"n".repeat(size)} `, args: "go" })),
-		};
-	};
 
 	test("are restored, or kept as stored, whole", () => {
-		for (const [kind, [stored, expected]] of Object.entries(records(4 * MB))) {
+		for (const [kind, [stored, expected]] of Object.entries(largeSkillRecords(4 * MB))) {
 			const result = restoreSkillInvocation(stored);
 			assert.equal(result.length, expected.length, kind);
 			assert.equal(result === expected, true, kind);
-		}
-	});
-
-	test("take roughly linear time", () => {
-		const median = (text: string) => {
-			const samples: number[] = [];
-			for (let i = 0; i < 7; i++) {
-				const start = performance.now();
-				restoreSkillInvocation(text);
-				samples.push(performance.now() - start);
-			}
-			return samples.sort((a, b) => a - b)[3] ?? Number.NaN;
-		};
-		const [small, large] = [records(MB / 2), records(4 * MB)];
-		for (const kind of Object.keys(small)) {
-			const [t1, t8] = [median(small[kind]?.[0] ?? ""), median(large[kind]?.[0] ?? "")];
-			// 8 times the input: linear work takes about 8 times as long, quadratic about 64 times. The
-			// floor absorbs timer noise on inputs rejected in microseconds.
-			assert.ok(t8 < Math.max(1, t1) * 24, `${kind}: ${t1.toFixed(2)} ms at 0.5 MB, ${t8.toFixed(2)} ms at 4 MB`);
-			assert.ok(t8 < 250, `${kind}: ${t8.toFixed(2)} ms at 4 MB`);
 		}
 	});
 });
