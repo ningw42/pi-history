@@ -94,6 +94,7 @@ export const Keys = {
 	escape: "\x1b",
 	ctrlR: "\x12",
 	ctrlT: "\x14",
+	ctrlW: "\x17",
 	/** Ctrl+M as a terminal without the Kitty keyboard protocol sends it: the same carriage return as Enter. */
 	ctrlMLegacy: "\r",
 	/** Ctrl+M under the Kitty keyboard protocol: a key of its own. */

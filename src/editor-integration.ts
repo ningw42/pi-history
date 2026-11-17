@@ -105,7 +105,7 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 				openModal(configured, data);
 				return;
 			}
-			// The Up entry, where Pi's own recall would start.
+			// The Up/previous-history entry, when the editor exposes the public state it needs.
 			if (startsHistoryRecall(editor, data)) {
 				openModal(configured, undefined);
 				return;
@@ -113,7 +113,8 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 			handleInput(data);
 		};
 		// Pi hands the input bar every prompt it submits or loads, for the editor's in-bar history.
-		// They are dropped, so no editor, whatever it lets the wrapper see, can recall one into the bar.
+		// They are dropped, so the editor gets none of Pi's history to recall into the bar, whatever
+		// it lets the wrapper see. Independently preloaded or maintained history is not inspected or cleared.
 		editor.addToHistory = () => {};
 		return editor;
 	});
@@ -134,21 +135,23 @@ const AUTOCOMPLETE_KEYBINDINGS = [
 ] as const;
 
 /**
- * Whether `data` is where Pi's editor would start recalling its in-bar history: the key bound to
- * Pi's previous-history action (unbound by default), anywhere; or the key bound to moving the
+ * Whether the Up/previous-history entry takes `data`: the key bound to Pi's previous-history
+ * action (unbound by default), anywhere; or the key bound to moving the
  * cursor up, pressed at the very start of the draft (Pi recalls from the first visual row only when
  * the draft is empty or the cursor is in its first column, which is the same place). An open
- * autocomplete popup keeps the keys it takes. Decided from the editor's public state and Pi's
- * keybindings, as Pi's editor decides it; an editor that does not report its cursor (Pi's editor
- * contract does not require it) gets the modal on an empty input bar only.
+ * autocomplete popup keeps the keys it takes; outside it, these keys win over any other editor
+ * action bound to them. Decided from the editor's public state and Pi's keybindings, as Pi's editor
+ * decides it. Pi's editor contract does not require an editor to report its cursor and popup, so
+ * for one that does not report both, this is never the place: the keys stay with that editor.
  */
 function startsHistoryRecall(editor: EditorComponent & Partial<Pick<Editor, "getCursor" | "isShowingAutocomplete">>, data: string): boolean {
+	if (typeof editor.getCursor !== "function" || typeof editor.isShowingAutocomplete !== "function") return false;
 	const keybindings = getKeybindings();
-	if (editor.isShowingAutocomplete?.() && AUTOCOMPLETE_KEYBINDINGS.some((name) => keybindings.matches(data, name))) return false;
+	if (editor.isShowingAutocomplete() && AUTOCOMPLETE_KEYBINDINGS.some((name) => keybindings.matches(data, name))) return false;
 	if (keybindings.matches(data, "tui.editor.historyPrevious")) return true;
 	if (!keybindings.matches(data, "tui.editor.cursorUp")) return false;
-	const cursor = editor.getCursor?.();
-	return cursor ? cursor.line === 0 && cursor.col === 0 : editor.getText() === "";
+	const { line, col } = editor.getCursor();
+	return line === 0 && col === 0;
 }
 
 /** What to tell the user about a list key that has the search key too; undefined when none has. */

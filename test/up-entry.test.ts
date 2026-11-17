@@ -29,7 +29,7 @@ async function openCompletionPopup(h: Harness): Promise<string | undefined> {
 	for (const name of ["alpha.txt", "beta.txt"]) writeFileSync(join(h.cwd, name), "");
 	h.press(Keys.tab);
 	await h.waitFor(() => selectedCompletion(h) !== undefined, "the completion popup");
-	assert.deepEqual(h.editorCursor(), { line: 0, col: 0 });
+	assert.equal(h.editorText(), "");
 	return selectedCompletion(h);
 }
 
@@ -48,13 +48,18 @@ class MarkerEditor extends CustomEditor {
 	}
 }
 
+/** The public methods of Pi's editor that report its cursor and its autocomplete popup. */
+type EditorCapability = "getCursor" | "isShowingAutocomplete";
+
 /**
  * Another extension's editor that offers only Pi's editor contract (`EditorComponent`), around Pi's
- * own editor: Pi's editing, autocomplete and in-bar history work behind it, but its cursor and
- * autocomplete popup cannot be seen.
+ * own editor, plus whichever of `capabilities` it passes on: Pi's editing, autocomplete and in-bar
+ * history work behind it, but without both capabilities its cursor or popup cannot be seen.
  */
-function contractOnlyEditor(inner: CustomEditor): EditorComponent {
+function contractOnlyEditor(inner: CustomEditor, capabilities: EditorCapability[] = []): EditorComponent {
+	const passedOn = Object.fromEntries(capabilities.map((name) => [name, () => inner[name]()]));
 	return {
+		...passedOn,
 		getText: () => inner.getText(),
 		setText: (text) => inner.setText(text),
 		handleInput: (data) => inner.handleInput(data),
@@ -323,6 +328,160 @@ describe("Pi's previous-history action, when the user binds a key to it", () => 
 	});
 });
 
+describe("outside the autocomplete popup, history wins over another editor action on the same key", () => {
+	test("Up at the start of the draft opens the modal even when Pi's keybindings also make it the Tab-completion key", async (t) => {
+		const h = harnessWithPrompts(t, ["recalled"], { keybindings: { "tui.input.tab": ["tab", "up"] } });
+		for (const name of ["alpha.txt", "beta.txt"]) writeFileSync(join(h.cwd, name), ""); // what Tab would complete
+		await h.start();
+
+		h.press(Keys.up);
+		await h.flush();
+		assertModalShown(h);
+		await h.loaded();
+
+		assert.deepEqual(h.modalList(), ["› recalled"]);
+		h.press(Keys.escape);
+		await h.flush();
+		assert.equal(selectedCompletion(h), undefined);
+		assert.equal(h.editorText(), "");
+	});
+
+	test("the previous-history key opens the modal even when it is also an editing key (Ctrl+W, delete word backward)", needsStub, async (t) => {
+		const h = harnessWithPrompts(t, ["recalled"], { keybindings: { "tui.editor.historyPrevious": "ctrl+w" } });
+		await h.start();
+		h.type("two words");
+
+		h.press(Keys.ctrlW);
+		await h.flush();
+
+		assertModalShown(h);
+		assert.equal(h.modalQuery(), "> two words");
+		h.press(Keys.escape);
+		await h.flush();
+		assert.equal(h.editorText(), "two words");
+	});
+});
+
+describe("an editor that does not report both its cursor and its autocomplete popup", () => {
+	/** An extension installing, around Pi's editor, an editor offering only Pi's editor contract plus `capabilities`. */
+	const adapterExtension = (capabilities: EditorCapability[] = []) =>
+		editorExtension((tui, theme, keybindings) => contractOnlyEditor(new CustomEditor(tui, theme, keybindings), capabilities));
+
+	for (const capabilities of [[], ["getCursor"], ["isShowingAutocomplete"]] as EditorCapability[][]) {
+		const reports = capabilities.join(" and ") || "neither";
+		test(`keeps Up and the previous-history key without recalling Pi-fed history (reports ${reports})`, async (t) => {
+			const h = harnessWithPrompts(t, ["from an earlier session"], {
+				keybindings: { "tui.editor.historyPrevious": "alt+p" },
+				extensionsBefore: [adapterExtension(capabilities)],
+			});
+			h.livePrompt("from this session", minutesAfterT0(10));
+			await h.start(); // Pi hands this session's prompts to the input bar's history
+			h.type("submitted now");
+			h.press(Keys.enter); // and every prompt it submits
+			assert.deepEqual(h.submissions, ["submitted now"]);
+
+			for (const key of [Keys.up, Keys.altP]) {
+				h.press(key);
+				await h.flush();
+				assertNoModal(h);
+				assert.equal(h.editorText(), "", `on an empty input bar, after ${JSON.stringify(key)}`);
+			}
+			h.type("my draft");
+			h.press(Keys.lineStart);
+			for (const key of [Keys.up, Keys.altP]) {
+				h.press(key);
+				await h.flush();
+				assertNoModal(h);
+				assert.equal(h.editorText(), "my draft", `at the start of a draft, after ${JSON.stringify(key)}`);
+			}
+		});
+
+		test(`leaves Up and the previous-history key to its autocomplete popup (reports ${reports})`, async (t) => {
+			const h = harnessWithPrompts(t, ["recalled"], {
+				keybindings: { "tui.editor.historyPrevious": "alt+p", "tui.select.up": ["up", "alt+p"] },
+				extensionsBefore: [adapterExtension(capabilities)],
+			});
+			await h.start();
+			let selected = await openCompletionPopup(h);
+
+			for (const key of [Keys.up, Keys.altP]) {
+				h.press(key);
+				await h.flush();
+				assertNoModal(h);
+				const next = selectedCompletion(h);
+				assert.ok(next, "the completion popup stays open");
+				assert.notEqual(next, selected);
+				selected = next;
+			}
+
+			h.press(Keys.tab);
+			await h.flush();
+			assertNoModal(h);
+			assert.equal(selectedCompletion(h), undefined);
+			assert.ok(selected?.includes(h.editorText().trim()) && h.editorText().trim() !== "", `completed ${JSON.stringify(h.editorText())} from ${selected}`);
+			assert.deepEqual(h.submissions, []);
+		});
+
+		test(`the configured search key opens the modal to dismiss or confirm (reports ${reports})`, needsStub, async (t) => {
+			const h = harnessWithPrompts(t, ["older", "newest"], { extensionsBefore: [adapterExtension(capabilities)] });
+			h.writeConfig({ searchKey: "ctrl+t" });
+			await h.start();
+			h.type("keep me");
+			h.press(Keys.left, Keys.left);
+
+			h.press(Keys.ctrlT);
+			await h.flush();
+			assert.equal(h.modalQuery(), "> keep me");
+			h.press(Keys.escape);
+			await h.flush();
+			assertNoModal(h);
+			assert.equal(h.editorText(), "keep me");
+			h.type("!"); // dismissal preserved the hidden cursor, too
+			assert.equal(h.editorText(), "keep !me");
+
+			h.press(Keys.ctrlT, Keys.clearLine);
+			await h.loaded();
+			h.press(Keys.enter);
+			await h.flush();
+			assertNoModal(h);
+			assert.equal(h.editorText(), "newest");
+			h.type("!"); // confirmation put the cursor at the end
+			assert.equal(h.editorText(), "newest!");
+			assert.deepEqual(h.submissions, []);
+		});
+	}
+
+	test("keeps its own Up: up a line on a lower line, nothing at the start of the draft", async (t) => {
+		const h = harnessWithPrompts(t, ["recalled"], { extensionsBefore: [adapterExtension()] });
+		await h.start();
+		h.type("first");
+		h.press("\n");
+		h.type("second");
+
+		h.press(Keys.up);
+		h.type("X"); // at the end of the line above
+		h.press(Keys.lineStart, Keys.up);
+		h.type("Y"); // still at the start of the draft
+		await h.flush();
+
+		assertNoModal(h);
+		assert.equal(h.editorText(), "YfirstX\nsecond");
+	});
+
+	test("reporting both, as Pi's editor does, gets the Up entry", async (t) => {
+		const h = harnessWithPrompts(t, ["recalled"], { extensionsBefore: [adapterExtension(["getCursor", "isShowingAutocomplete"])] });
+		await h.start();
+		h.type("my draft");
+		h.press(Keys.lineStart);
+
+		h.press(Keys.up);
+		await h.flush();
+
+		assertModalShown(h);
+		assert.equal(h.editorText(), "my draft");
+	});
+});
+
 describe("Pi's in-bar history recall", () => {
 	test("is unreachable: no key recalls a prompt into the input bar", async (t) => {
 		const h = harnessWithPrompts(t, ["from an earlier session"], {
@@ -484,30 +643,6 @@ describe("the input bar's editor", () => {
 		h.press(Keys.ctrlR);
 		await h.flush();
 		assertModalShown(h);
-	});
-
-	test("composes an editor that offers only Pi's editor contract: nothing is recalled into the bar, and Up opens the modal on an empty input bar", async (t) => {
-		const h = harnessWithPrompts(t, ["from an earlier session"], {
-			extensionsBefore: [editorExtension((tui, theme, keybindings) => contractOnlyEditor(new CustomEditor(tui, theme, keybindings)))],
-		});
-		h.livePrompt("from this session", minutesAfterT0(10));
-		await h.start(); // Pi hands this session's prompts to the input bar's history
-		h.type("submitted now");
-		h.press(Keys.enter); // and every prompt it submits
-		h.type("my draft");
-		h.press(Keys.lineStart);
-
-		h.press(Keys.up); // at the start of the draft, which the wrapper cannot see
-		await h.flush();
-		assertNoModal(h);
-		assert.equal(h.editorText(), "my draft");
-
-		h.press(Keys.lineEnd, Keys.clearLine, Keys.up);
-		await h.loaded();
-		assert.deepEqual(h.modalList(), ["  from an earlier session", "› from this session"]);
-		h.press(Keys.escape);
-		await h.flush();
-		assert.equal(h.editorText(), "");
 	});
 
 	test("is otherwise Pi's custom editor, with the working status embedded in its top border", async (t) => {
