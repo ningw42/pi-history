@@ -24,10 +24,12 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
  * Only an envelope that starts the text is restored, and only an unambiguous one: any other text,
  * including an envelope whose name could not be typed back as a command, whose FILE is not
  * absolute, or whose prologue line is missing or malformed, is returned as it is. The body ends at
- * the first closing tag that is followed by the end of the text or by a blank line and arguments
- * (Pi writes nothing else after its own); when the text after that one holds a line that is
- * exactly the closing tag, the body might end there instead, so the envelope is ambiguous. Pi's
- * own skill-block parser is not used: it takes the first closing tag and trims the arguments.
+ * the first closing tag, where Pi's own skill-block parser would stop: the first line after the
+ * prologue's blank line, the body's first line included, that is exactly the closing tag and is
+ * followed by the end of the text or by a blank line and arguments (Pi writes nothing else after
+ * its own). When the text after it holds a line that is exactly the closing tag, the body might
+ * end there instead, so the envelope is ambiguous. That parser is not used itself: it would take
+ * the first closing tag even then, and it trims the arguments.
  * Nothing but the text is consulted, so a skill that is no longer loaded is restored too: history
  * shows what was typed.
  *
@@ -42,22 +44,18 @@ export function restoreSkillInvocation(text: string): string {
 	const openingTagEnd = text.indexOf(OPENING_TAG_END, locationStart);
 	if (openingTagEnd === -1 || !SAFE_NAME.test(name) || !isAbsolute(text.slice(locationStart, openingTagEnd))) return text;
 
-	// The prologue: one line naming the base directory, then a blank line.
+	// The prologue: one line naming the base directory, then a blank line. (PROLOGUE ends in a
+	// space, so a line that starts with it and ends in "." names a directory, or none.)
 	const prologueStart = openingTagEnd + OPENING_TAG_END.length;
 	const prologueEnd = text.indexOf("\n", prologueStart);
-	if (
-		prologueEnd === -1 ||
-		!text.startsWith(PROLOGUE, prologueStart) ||
-		prologueEnd - prologueStart < PROLOGUE.length + 1 ||
-		text[prologueEnd - 1] !== "." ||
-		text[prologueEnd + 1] !== "\n"
-	) {
+	if (prologueEnd === -1 || !text.startsWith(PROLOGUE, prologueStart) || text[prologueEnd - 1] !== "." || text[prologueEnd + 1] !== "\n") {
 		return text;
 	}
 
-	const bodyStart = prologueEnd + 2;
+	// From the blank line's line break on, so that a closing tag on the body's first line counts too.
+	const blankLine = prologueEnd + 1;
 	for (
-		let closingTag = text.indexOf(CLOSING_TAG_AT_LINE_START, bodyStart);
+		let closingTag = text.indexOf(CLOSING_TAG_AT_LINE_START, blankLine);
 		closingTag !== -1;
 		closingTag = text.indexOf(CLOSING_TAG_AT_LINE_START, closingTag + 1)
 	) {

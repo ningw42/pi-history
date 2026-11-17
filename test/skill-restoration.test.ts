@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+import { statSync } from "node:fs";
+import { join } from "node:path";
+import { describe, type TestContext, test } from "node:test";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { restoreSkillInvocation } from "../src/skill-restoration.ts";
-import { harnessWithPrompts, Keys, minutesAfterT0, needsStub } from "./harness.ts";
+import { type Harness, harnessWithPrompts, Keys, minutesAfterT0, needsStub, useHarness } from "./harness.ts";
 
 const LOCATION = "/abs/skills/code-review/SKILL.md";
 const BODY = "Review the diff carefully.\n\n## Steps\n1. Read every hunk.";
@@ -54,9 +57,26 @@ describe("restoring a skill invocation", () => {
 			"/skill:code-review go",
 		],
 		[
+			"a closing tag right after the prologue's blank line, with no body line",
+			`<skill name="code-review" location="${LOCATION}">\nReferences are relative to /abs/skills/code-review.\n\n</skill>\n\ngo`,
+			"/skill:code-review go",
+		],
+		// Pi's own parser does not stop at a closing tag followed by a single line break, and Pi writes
+		// nothing but the end of the text or a blank line after its own, so these cannot end the body.
+		[
 			"a body holding closing tags that cannot end it",
 			skillEnvelope({ body: "Inline </skill> tag.\n</skill>X is no closer.\n</skill>\nnor is this.", args: "go" }),
 			"/skill:code-review go",
+		],
+		[
+			"a body line that is exactly the closing tag, followed by more instructions",
+			skillEnvelope({ body: "example\n</skill>\nmore instructions", args: "go" }),
+			"/skill:code-review go",
+		],
+		[
+			"the same without arguments",
+			skillEnvelope({ body: "example\n</skill>\nmore instructions" }),
+			"/skill:code-review",
 		],
 		[
 			"arguments holding closing tags that are not lines of their own",
@@ -98,6 +118,8 @@ describe("restoring a skill invocation", () => {
 		// is exactly the closing tag, so where the body ends, and what the arguments are, is ambiguous.
 		["an early closing tag followed by a blank line in the body", skillEnvelope({ body: "Example:\n</skill>\n\nnot the arguments", args: "go" })],
 		["the same without arguments", skillEnvelope({ body: "Example:\n</skill>\n\nnot the arguments" })],
+		["a closing tag followed by a blank line as the body's first line", skillEnvelope({ body: "</skill>\n\nexample", args: "go" })],
+		["the same without arguments, too", skillEnvelope({ body: "</skill>\n\nexample" })],
 		...["</skill>", "</skill>\nafter", "before\n</skill>", "before\n</skill>\nafter", "before\n\n</skill>\n\nafter"].map(
 			(args): [string, string] => [`arguments ${JSON.stringify(args)} with a line that is exactly the closing tag`, skillEnvelope({ args })],
 		),
@@ -166,11 +188,8 @@ describe("a stored skill invocation in the modal", () => {
 
 		h.type("review");
 		await h.waitFor(() => h.modalList().join() === `› ${restored}`, "results for review");
-		const input = h.matcherCalls()[0]?.input ?? [];
-		assert.deepEqual(input, [restored, "older prompt"]);
-		for (const word of ["carefully", "hunk", "References", LOCATION]) {
-			assert.equal(input.some((record) => record.includes(word)), false, `the matcher was given "${word}"`);
-		}
+		// Exactly these records: no word of the skill body reaches the matcher.
+		assert.deepEqual(h.matcherCalls()[0]?.input, [restored, "older prompt"]);
 
 		h.press(Keys.enter);
 		await h.flush();
@@ -188,5 +207,61 @@ describe("a stored skill invocation in the modal", () => {
 		await h.loaded();
 
 		assert.deepEqual(h.modalList(), ["  /skill:code-review other", "  /skill:code-review", "› /skill:code-review go"]);
+	});
+});
+
+describe("updating from a version that kept prompts as stored", () => {
+	type StoredPrompt = { text: string; timestamp: number };
+
+	/**
+	 * Leave, for the harness's session storage, the process-wide state that the extension up to
+	 * issue #6 (`main` at 5fa1da4) left behind, keyed and shaped as it kept it: the prompts of the
+	 * ephemeral sessions that ended in this process, by text as stored, and what it read from
+	 * session files, prompts as stored. As after a `--no-session` run that went through `/new`.
+	 */
+	function leaveVersion1State(
+		h: Harness,
+		t: TestContext,
+		state: { endedEphemeralPrompts: StoredPrompt[]; files: [path: string, prompts: StoredPrompt[]][] },
+	): void {
+		const key = JSON.stringify({ layout: "default", root: join(getAgentDir(), "sessions") });
+		const versionOf = (path: string) => {
+			const stats = statSync(path);
+			return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+		};
+		const record = (prompt: StoredPrompt) => ({ ...prompt, cwd: h.cwd });
+		const global = globalThis as typeof globalThis & Record<symbol, Map<string, unknown> | undefined>;
+		const states = (global[Symbol.for("pi-history.storageStates.v1")] ??= new Map());
+		states.set(key, {
+			files: new Map(state.files.map(([path, prompts]) => [path, { version: versionOf(path), cwd: h.cwd, prompts: prompts.map(record) }])),
+			endedEphemeralPrompts: new Map(state.endedEphemeralPrompts.map((prompt) => [prompt.text, record(prompt)])),
+		});
+		t.after(() => global[Symbol.for("pi-history.storageStates.v1")]?.delete(key));
+	}
+
+	test("keeps the ended ephemeral sessions' prompts, restored, in both scopes, and reads session files afresh", async (t) => {
+		const h = useHarness(t, { noSession: true });
+		const fromDisk = skillEnvelope({ args: "from disk" });
+		const file = h.writeSession({ cwd: h.cwd, prompts: [{ text: fromDisk, timestamp: minutesAfterT0(4) }] });
+		leaveVersion1State(h, t, {
+			endedEphemeralPrompts: [
+				// Two uses of one command, kept apart by their skill bodies until restored; the newer one counts.
+				{ text: skillEnvelope({ body: "Edited instructions.", args: "go" }), timestamp: minutesAfterT0(5) },
+				{ text: "typed before the update", timestamp: minutesAfterT0(1) },
+				{ text: skillEnvelope({ args: "go" }), timestamp: minutesAfterT0(2) },
+			],
+			files: [[file, [{ text: fromDisk, timestamp: minutesAfterT0(4) }]]],
+		});
+
+		await h.start("reload"); // the updated extension, in the session /new started
+		h.press(Keys.ctrlR);
+		await h.loaded();
+		const restored = ["  typed before the update", "  /skill:code-review from disk", "› /skill:code-review go"];
+		assert.deepEqual(h.modalList(), restored);
+
+		h.press(Keys.ctrlR);
+		await h.loaded();
+		assert.match(h.modalTitle() ?? "", /History · global/);
+		assert.deepEqual(h.modalList(), restored);
 	});
 });
