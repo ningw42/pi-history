@@ -46,7 +46,7 @@ Install the latest `main` from Git (no npm publication or build needed):
 pi install git:github.com/ningw42/pi-history
 ```
 
-For a pinned release, append a published tag, for example `git:github.com/ningw42/pi-history@v0.1.0` once that release exists. Tags stay pinned when Pi updates packages; choose a newer tag explicitly to upgrade.
+For a pinned release, append a published tag, for example `git:github.com/ningw42/pi-history@v0.0.1` once that release exists. Tags stay pinned when Pi updates packages; choose a newer tag explicitly to upgrade.
 
 From a development clone:
 
@@ -240,7 +240,7 @@ To release:
 
 3. `.github/workflows/release.yml` reruns the same CI suite for the tagged commit. Only after it passes, the release job checks that the stable `vX.Y.Z` tag matches both version fields in the lockfile and `package.json`, points at the checked-out commit, and is contained in `origin/main`. It then creates a GitHub release with generated notes using the built-in `GITHUB_TOKEN`. Only this job gets `contents: write`. Re-running the job leaves an existing release unchanged.
 
-For the first release, the existing `0.1.0` can be tagged after this setup is merged; no artificial bump is needed. Prerelease tags are not supported yet. Published tags are immutable by convention: fix a bad release with a new version instead of moving its tag. A tag is installable by Pi as soon as it is pushed, even if the GitHub release checks later fail—those checks gate the GitHub release, not Git access to the ref. Generated release notes live on GitHub; this setup does not maintain a `CHANGELOG.md` for Pi's in-app update notices.
+For the first release, the existing `0.0.1` can be tagged after this setup is merged; no artificial bump is needed. Prerelease tags are not supported yet. Published tags are immutable by convention: fix a bad release with a new version instead of moving its tag. A tag is installable by Pi as soon as it is pushed, even if the GitHub release checks later fail—those checks gate the GitHub release, not Git access to the ref. Generated release notes live on GitHub; this setup does not maintain a `CHANGELOG.md` for Pi's in-app update notices.
 
 ### Tests
 
