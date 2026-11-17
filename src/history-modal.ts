@@ -15,6 +15,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { HistoryRecord, Scope } from "./history-source.ts";
+import { sameKey } from "./key-syntax.ts";
 import type { MatchOutcome, Matcher } from "./matcher.ts";
 
 /** How the history modal closed. */
@@ -30,10 +31,13 @@ export interface HistoryModalOptions {
 	loadRecords: (scope: Scope, signal: AbortSignal) => Promise<HistoryRecord[]>;
 	/** Filters and ranks the records for a non-empty query. */
 	matcher: Matcher;
-	/** The search key, which opened the modal; inside it, it switches between the repo and global scopes. */
+	/** The search key: it opens the modal from the input bar, and inside it switches between the repo and global scopes. */
 	searchKey: KeyId;
-	/** The input that opened the modal: the search key as this terminal sends it. */
-	searchKeyInput: string;
+	/**
+	 * The input that opened the modal when the search key did: the search key as this terminal
+	 * sends it. Undefined when the Up entry opened the modal (see `searchKeyConflict`).
+	 */
+	searchKeyInput: string | undefined;
 	done: (result: ModalResult) => void;
 }
 
@@ -64,13 +68,23 @@ export interface SearchKeyConflict {
 }
 
 /**
- * The list keybinding that the search key also acts as, if any: the one the search key's own
- * input (as this terminal sent it to open the modal) matches in the effective Pi keybindings. So
- * a shared binding counts, and so does a key the terminal sends identically, such as Ctrl+M
- * arriving as Enter without the Kitty keyboard protocol; with the protocol they stay distinct.
+ * The list keybinding that the search key also acts as, if any, in the effective Pi keybindings.
+ * When the search key opened the modal, its own input (as this terminal sent it) is matched: so a
+ * shared binding counts, and so does a key the terminal sends identically, such as Ctrl+M arriving
+ * as Enter without the Kitty keyboard protocol; with the protocol they stay distinct. Without that
+ * input (the Up entry opened the modal), only a list keybinding that has the search key itself
+ * counts.
  */
-export function searchKeyConflict(searchKeyInput: string, keybindings: KeybindingsManager): SearchKeyConflict | undefined {
-	const keybinding = LIST_KEYBINDINGS.find((name) => keybindings.matches(searchKeyInput, name));
+export function searchKeyConflict(
+	searchKey: KeyId,
+	searchKeyInput: string | undefined,
+	keybindings: KeybindingsManager,
+): SearchKeyConflict | undefined {
+	const hasSearchKey = (name: (typeof LIST_KEYBINDINGS)[number]) =>
+		searchKeyInput === undefined
+			? keybindings.getKeys(name).some((key) => sameKey(key, searchKey))
+			: keybindings.matches(searchKeyInput, name);
+	const keybinding = LIST_KEYBINDINGS.find(hasSearchKey);
 	return keybinding && { keybinding, description: keybindings.getDefinition(keybinding).description ?? keybinding };
 }
 
@@ -138,7 +152,7 @@ export class HistoryModal implements Component, Focusable {
 
 	constructor(options: HistoryModalOptions) {
 		this.options = options;
-		this.searchKeyConflict = searchKeyConflict(options.searchKeyInput, options.keybindings);
+		this.searchKeyConflict = searchKeyConflict(options.searchKey, options.searchKeyInput, options.keybindings);
 		const query = startingQuery(options.draft);
 		// Seeded as a bracketed paste: Input has no API to place the cursor, and a paste leaves it
 		// at the end, ready for refining.

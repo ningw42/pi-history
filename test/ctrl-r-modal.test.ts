@@ -4,21 +4,19 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { Harness, Keys, minutesAfterT0, needsPosixPermissions, useHarness } from "./harness.ts";
-
-/** The rendered overlay shows the history modal. */
-function assertModalShown(h: Harness): void {
-	assert.match(h.overlayLines()[0] ?? "", /History/);
-}
+import {
+	assertModalShown,
+	assertNoModal,
+	Harness,
+	Keys,
+	minutesAfterT0,
+	needsPosixPermissions,
+	useHarness,
+} from "./harness.ts";
 
 /** Open the modal and clear the query the draft started it with, to browse every record newest first. */
 function openToBrowse(h: Harness): void {
 	h.press(Keys.ctrlR, Keys.clearLine);
-}
-
-/** No overlay is rendered. */
-function assertNoModal(h: Harness): void {
-	assert.deepEqual(h.overlayLines(), []);
 }
 
 /** One session in the current directory with prompts "one", "two", "three", oldest first. */
