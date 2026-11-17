@@ -36,6 +36,9 @@ export interface EditorIntegrationOptions {
 /**
  * Install the entry points into the history modal on Pi's input bar.
  *
+ * Wrap the editor rather than registering a shortcut: registration also applies outside TUI mode,
+ * and Pi 1.5.2 reports Ctrl+R as a startup conflict with /resume's rename binding.
+ *
  * Must run synchronously inside `session_start`, before any I/O: replacing the editor later would
  * dismiss a selector the user opened in the meantime (for example `/model`). No history is read,
  * no configuration is consulted and no editor text is written here.

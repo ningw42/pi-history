@@ -324,7 +324,11 @@ async function versionOf(path: string): Promise<string | undefined> {
 	}
 }
 
-/** Every session file in Pi's storage. A directory that cannot be listed holds none. */
+/**
+ * Every session file in Pi's storage. A directory that cannot be listed holds none.
+ * List files directly: SessionManager.list/listAll parse every line to build summaries we do not
+ * use. Reading headers first avoids parsing out-of-scope sessions.
+ */
 async function sessionFiles(storage: SessionStorage): Promise<string[]> {
 	const directories =
 		storage.layout === "custom"
@@ -406,7 +410,11 @@ async function inRepoScopeOf(cwd: string): Promise<(recorded: string) => Promise
 	};
 }
 
-/** The top-level directory of the git repository containing `dir`: the nearest top level at or above it. */
+/**
+ * The top-level directory of the git repository containing `dir`: the nearest top level at or above it.
+ * Preserve symlink spellings: `git rev-parse --show-toplevel` resolves them, which can make the root
+ * differ from the cwd strings Pi records (for example /var versus /private/var on macOS).
+ */
 async function repositoryRoot(dir: string): Promise<string | undefined> {
 	for (let current = dir; ; current = dirname(current)) {
 		if (await isRepositoryTopLevel(current)) return current;
