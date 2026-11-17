@@ -18,7 +18,10 @@ export interface EditorIntegrationOptions {
 	 * install before any I/O and read the configuration right afterwards, in the same synchronous step.
 	 */
 	configured: () => ConfiguredParts;
-	/** The current directory and Pi's session storage, resolved at every load (on opening the modal and on each scope switch). */
+	/**
+	 * The current directory, Pi's session storage and the live session, resolved at every load (on
+	 * opening the modal and on each scope switch), so prompts submitted moments ago are included.
+	 */
 	sessionContext: () => SessionContext;
 	/**
 	 * Tells the user, once, that the search key cannot switch scope because a list key has it;

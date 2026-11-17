@@ -2,8 +2,10 @@
  * Extension-boundary test harness.
  *
  * Loads the real extension entry point against a fake Pi API and UI context, with Pi's real
- * editor component. History comes from synthetic session files in a temporary agent directory;
- * no real prompt history is ever read. The extension's configuration file is read from that
+ * editor component. History comes from synthetic session files in a temporary agent directory
+ * (`writeSession()`, or `writeSessionEntries()` for branches, compactions and content blocks) and
+ * from a fake live session that Pi's session manager holds in memory (`liveEntries`,
+ * `livePrompt()`); no real prompt history is ever read. The extension's configuration file is read from that
  * agent directory too (`writeConfig()`), so the user's real configuration never applies. The fake mirrors Pi's overlay lifecycle: the overlay is
  * mounted and focused asynchronously, and closing it gives focus back to the editor before the
  * result promise settles. Git repositories are synthetic too (`makeGitRepo()`, `makeGitWorktree()`,
@@ -99,6 +101,54 @@ export interface SessionSpec {
 	dir?: string;
 }
 
+/** A session entry as Pi stores it, one per line of a session file. */
+export type SessionEntry = { type: string; id: string; parentId: string | null; timestamp: string } & Record<string, unknown>;
+
+/** A session entry of `type` with the fields every entry has, and its own `fields`. */
+function sessionEntry(type: string, id: string, parentId: string | null, timestamp: number, fields: Record<string, unknown>): SessionEntry {
+	return { type, id, parentId, timestamp: new Date(timestamp).toISOString(), ...fields };
+}
+
+/** A user message entry. `content` is a string or Pi's content blocks (text, image, …). */
+export function userEntry(id: string, parentId: string | null, content: string | unknown[], timestamp: number): SessionEntry {
+	return sessionEntry("message", id, parentId, timestamp, { message: { role: "user", content, timestamp } });
+}
+
+/** An assistant reply entry. */
+export function assistantEntry(id: string, parentId: string | null, timestamp: number): SessionEntry {
+	return sessionEntry("message", id, parentId, timestamp, {
+		message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop", timestamp },
+	});
+}
+
+/**
+ * A prompt (`<id>u`) after the last of `entries`, answered by the assistant (`<id>a`) a millisecond
+ * later, appended to `entries`: how the harness models a conversation, on disk and in memory.
+ */
+function appendExchange(entries: SessionEntry[], id: string, text: string, timestamp: number): void {
+	entries.push(userEntry(`${id}u`, entries.at(-1)?.id ?? null, text, timestamp));
+	entries.push(assistantEntry(`${id}a`, `${id}u`, timestamp + 1));
+}
+
+/** A compaction entry: the model's context keeps only the entries from `firstKeptEntryId` on, the file keeps them all. */
+export function compactionEntry(id: string, parentId: string, firstKeptEntryId: string, timestamp: number): SessionEntry {
+	return sessionEntry("compaction", id, parentId, timestamp, {
+		summary: "summary of the earlier conversation",
+		firstKeptEntryId,
+		tokensBefore: 1000,
+	});
+}
+
+/** Pi's session file name: the session's start time, then its id. */
+function sessionFileName(timestamp: string, id: string): string {
+	return `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`;
+}
+
+/** The fake live session's header: started an hour before T0, in the harness's working directory. */
+function liveHeaderIn(cwd: string) {
+	return { type: "session", version: 3, id: "live", timestamp: new Date(minutesAfterT0(-60)).toISOString(), cwd };
+}
+
 export interface StubMatcherResponse {
 	query?: string;
 	/** Use this response only when the stub is given this record. */
@@ -152,6 +202,15 @@ export class Harness {
 	/** Every ExtensionAPI method the extension called, other than `on`. */
 	readonly registrations: string[] = [];
 	readonly submissions: string[] = [];
+	/**
+	 * The running session's entries as Pi holds them in memory, every branch included; Pi's session
+	 * manager reports them through `getEntries()`. Tests append to it (`livePrompt()`) to model
+	 * prompts submitted while Pi runs. The harness never writes them to disk; `writeSessionEntries()`
+	 * with `liveSessionFile` does.
+	 */
+	readonly liveEntries: SessionEntry[] = [];
+	/** The file Pi keeps the running session in (it may not exist yet); undefined in an ephemeral session. */
+	readonly liveSessionFile: string | undefined;
 	editorFactoryInstalls = 0;
 
 	private readonly options: HarnessOptions;
@@ -176,6 +235,8 @@ export class Harness {
 		this.sessionDir = options.customSessionDir
 			? join(this.root, options.customSessionDir)
 			: defaultSessionDir(this.agentDir, this.cwd);
+		const liveHeader = liveHeaderIn(this.cwd);
+		this.liveSessionFile = options.noSession ? undefined : join(this.sessionDir, sessionFileName(liveHeader.timestamp, liveHeader.id));
 		this.matcherLog = join(this.root, "matcher-log.jsonl");
 		this.setEnv("PI_CODING_AGENT_DIR", this.agentDir);
 		// Pi's session-directory override must not leak in from the host: it would point the
@@ -195,48 +256,38 @@ export class Harness {
 		return join(this.root, relative);
 	}
 
-	/** Write a synthetic session file. Stored in Pi's default per-cwd directory unless `dir` is given. */
+	/**
+	 * Write a synthetic session file of one conversation, each prompt answered by the assistant.
+	 * Stored in Pi's default per-cwd directory unless `dir` is given.
+	 */
 	writeSession(spec: SessionSpec): string {
-		const dir = spec.dir ?? (this.options.customSessionDir ? this.sessionDir : defaultSessionDir(this.agentDir, spec.cwd));
-		mkdirSync(dir, { recursive: true });
+		const entries: SessionEntry[] = [];
+		spec.prompts.forEach((prompt, i) => appendExchange(entries, `p${i}`, prompt.text, prompt.timestamp));
+		return this.writeSessionEntries({ cwd: spec.cwd, entries, dir: spec.dir });
+	}
+
+	/**
+	 * Write a synthetic session file holding `entries` after its header, as Pi lays them out: one
+	 * JSON line each. Stored at `path`, or in `dir`, or in Pi's default per-cwd directory.
+	 */
+	writeSessionEntries(spec: { cwd: string; entries: SessionEntry[]; dir?: string; path?: string }): string {
 		const n = ++this.sessionCounter;
 		const id = `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-		const first = spec.prompts[0]?.timestamp ?? 0;
-		const lines: string[] = [
-			JSON.stringify({ type: "session", version: 3, id, timestamp: new Date(first).toISOString(), cwd: spec.cwd }),
-		];
-		let parentId: string | null = null;
-		spec.prompts.forEach((prompt, i) => {
-			const userId = `u${n}x${i}`;
-			lines.push(
-				JSON.stringify({
-					type: "message",
-					id: userId,
-					parentId,
-					timestamp: new Date(prompt.timestamp).toISOString(),
-					message: { role: "user", content: prompt.text, timestamp: prompt.timestamp },
-				}),
-			);
-			const assistantId = `a${n}x${i}`;
-			lines.push(
-				JSON.stringify({
-					type: "message",
-					id: assistantId,
-					parentId: userId,
-					timestamp: new Date(prompt.timestamp + 1).toISOString(),
-					message: {
-						role: "assistant",
-						content: [{ type: "text", text: "ok" }],
-						stopReason: "stop",
-						timestamp: prompt.timestamp + 1,
-					},
-				}),
-			);
-			parentId = assistantId;
-		});
-		const file = join(dir, `${new Date(first).toISOString().replace(/[:.]/g, "-")}_${id}.jsonl`);
-		writeFileSync(file, `${lines.join("\n")}\n`);
+		const first = spec.entries[0]?.timestamp ?? new Date(0).toISOString();
+		const dir = spec.dir ?? (this.options.customSessionDir ? this.sessionDir : defaultSessionDir(this.agentDir, spec.cwd));
+		const file = spec.path ?? join(dir, sessionFileName(first, id));
+		mkdirSync(dirname(file), { recursive: true });
+		const header = { type: "session", version: 3, id, timestamp: first, cwd: spec.cwd };
+		writeFileSync(file, [header, ...spec.entries].map((entry) => `${JSON.stringify(entry)}\n`).join(""));
 		return file;
+	}
+
+	/**
+	 * Submit `text` in the running session: Pi appends it to the session in memory at once, answered
+	 * by the assistant a moment later. Nothing is written to disk.
+	 */
+	livePrompt(text: string, timestamp: number): void {
+		appendExchange(this.liveEntries, `live${this.liveEntries.length}`, text, timestamp);
 	}
 
 	/** The extension's configuration file, in the agent directory Pi reports. */
@@ -257,14 +308,26 @@ export class Harness {
 
 	/**
 	 * Start a session the way Pi 1.5.2 does, at startup and again on `/new`, `/resume`, `/fork` and
-	 * `/reload`: reset the extension UI (dropping the installed editor factory; the editor's text is
-	 * carried over), load the extension afresh through its real entry point, then emit
-	 * `session_start`. Pi also re-imports the module each time, which the harness cannot do, so the
-	 * extension must not rely on module state surviving between loads.
+	 * `/reload`: after startup, first emit `session_shutdown` to the outgoing extension, while its
+	 * session is intact; then reset the extension UI (dropping the installed editor factory; the
+	 * editor's text is carried over), switch the live session to `liveEntries` if given (as Pi's
+	 * `/new`, `/resume` and `/fork` replace it; `/reload` keeps it), load the extension afresh
+	 * through its real entry point, and emit `session_start`. Pi also re-imports the module each
+	 * time, which the harness cannot do, so the extension must not rely on module state surviving
+	 * between loads.
 	 */
-	async start(reason: "startup" | "new" | "resume" | "fork" | "reload" = "startup"): Promise<void> {
+	async start(
+		reason: "startup" | "new" | "resume" | "fork" | "reload" = "startup",
+		{ liveEntries }: { liveEntries?: SessionEntry[] } = {},
+	): Promise<void> {
+		if (reason !== "startup") {
+			for (const handler of this.handlers.get("session_shutdown") ?? []) {
+				await handler({ type: "session_shutdown", reason }, this.fakeContext());
+			}
+		}
 		this.editorFactory = undefined;
 		this.handlers.clear();
+		if (liveEntries) this.liveEntries.splice(0, this.liveEntries.length, ...liveEntries);
 		piHistory(this.fakePi());
 		for (const handler of this.handlers.get("session_start") ?? []) {
 			await handler({ type: "session_start", reason }, this.fakeContext());
@@ -503,6 +566,9 @@ export class Harness {
 		const sessionDir = this.sessionDir;
 		const noSession = this.options.noSession ?? false;
 		const cwd = this.cwd;
+		const liveEntries = this.liveEntries;
+		const liveSessionFile = this.liveSessionFile;
+		const liveHeader = liveHeaderIn(cwd);
 		const ui = {
 			notify: (message: string, type?: string) => this.notifications.push({ message, type }),
 			getEditorComponent: () => this.editorFactory,
@@ -562,9 +628,13 @@ export class Harness {
 			hasUI: mode === "tui" || mode === "rpc",
 			cwd,
 			ui,
+			// Mirrors Pi's SessionManager: getEntries() returns a shallow copy of every entry, all branches.
 			sessionManager: {
 				getCwd: () => cwd,
 				getSessionDir: () => (noSession ? "" : sessionDir),
+				getSessionFile: () => liveSessionFile,
+				getHeader: () => liveHeader,
+				getEntries: () => [...liveEntries],
 			},
 		} as unknown as ExtensionContext;
 	}
@@ -670,3 +740,8 @@ export const windowsSkip = (reason: string) => ({ skip: process.platform === "wi
 
 /** Node refuses to start the stub's `.cmd` launcher without a shell, and the matcher never uses one. */
 export const needsStub = windowsSkip("the stub matcher cannot be started without a shell on Windows");
+
+/** Test options skipping a test that makes a file unreadable: POSIX permissions do not stop root, nor apply on Windows. */
+export const needsPosixPermissions = {
+	skip: process.platform === "win32" || process.getuid?.() === 0 ? "POSIX read-permission test requires a non-root Unix user" : false,
+};
