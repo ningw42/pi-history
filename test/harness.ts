@@ -15,12 +15,10 @@
  *
  * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
  * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalLastUsed()`,
- * `modalPreview()`, `modalQuery()`, `modalHint()`; empty or undefined when no overlay is shown), the
+ * `modalPreview()`, `modalQuery()`, `modalHint()`, `modalHints()`; empty or undefined when no overlay is shown), the
  * colours of the modal's frame and title (`modalColours()`) and of each list row
  * (`modalListColours()`), and whether the modal places the terminal cursor (`modalShowsCursor()`).
- * The terminal can be resized (`resize()`). Times are shown in UTC unless a test sets `TZ`; Node on
- * Windows ignores `TZ`, so tests showing times skip there unless the system's zone is UTC
- * (`needsUtc`), and tests setting another zone skip there (`needsTimeZoneSetting`). Like Pi,
+ * The terminal can be resized (`resize()`), and times are shown in UTC unless a test sets `TZ`. Like Pi,
  * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
  * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
  * boundaries, for behaviour that has no visible output: prompts handed to Pi for submission
@@ -246,8 +244,8 @@ export class Harness {
 		// Pi's session-directory override must not leak in from the host: it would point the
 		// extension at real history. Tests that need it set it explicitly with setEnv().
 		this.setEnv("PI_CODING_AGENT_SESSION_DIR", undefined);
-		// Times are shown in local time; a fixed zone makes them the same on every machine (but on
-		// Windows, where Node ignores TZ: see needsUtc).
+		// Times are shown in local time; a fixed zone makes them the same on every machine. Node
+		// applies an assignment to TZ at once, on Windows too (since Node 16.2).
 		this.setEnv("TZ", "UTC");
 		this.installStubMatcher(options.stubMatcher ?? {});
 
@@ -413,9 +411,14 @@ export class Harness {
 		return this.overlayLines(width)[0];
 	}
 
-	/** The modal's bottom frame line (its key hint), ANSI-stripped; undefined when no modal is shown. */
+	/** The modal's bottom frame line (its key hints, or their last row), ANSI-stripped; undefined when no modal is shown. */
 	modalHint(width = 80): string | undefined {
 		return this.overlayLines(width).at(-1);
+	}
+
+	/** Every row of the modal's key hints, without frame characters: rows above the bottom edge, then its label. */
+	modalHints(width = 80): string[] {
+		return this.modalSections(width).hints;
 	}
 
 	/**
@@ -494,29 +497,35 @@ export class Harness {
 
 	/**
 	 * The overlay frame's rows, split at its two rules: the list above the first, the preview between
-	 * them (the first rule's label is the selected record's last use), the query line below the second.
+	 * them (the first rule's label is the selected record's last use), and below the second the query
+	 * line, then the key hints: rows of their own when they do not fit the bottom edge, and its label.
 	 */
 	private modalSections(width: number): {
 		list: string[];
 		lastUsed: string | undefined;
 		preview: string[];
 		query: string | undefined;
+		hints: string[];
 	} {
 		const lines = this.overlayLines(width);
-		if (lines.length === 0) return { list: [], lastUsed: undefined, preview: [], query: undefined };
+		if (lines.length === 0) return { list: [], lastUsed: undefined, preview: [], query: undefined, hints: [] };
 		const rules = lines.flatMap((line, index) => (line.startsWith("├") ? [index] : []));
 		const [previewRule, queryRule] = rules;
 		if (rules.length !== 2 || previewRule === undefined || queryRule === undefined) {
 			throw new Error(`expected a list, a preview and a query line in the rendered modal:\n${lines.join("\n")}`);
 		}
 		const inner = (line: string) => line.replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd();
-		// A label too wide for the rule is truncated with "…", without its trailing space.
-		const label = /^├─ (.*?) ?─*┤$/u.exec(lines[previewRule] ?? "")?.[1];
+		// A label too wide for its edge is truncated with "…", without its trailing space.
+		const label = (line: string | undefined, left: string, right: string) =>
+			new RegExp(`^${left}─ (.*?) ?─*${right}$`, "u").exec(line ?? "")?.[1];
+		const bottomLabel = label(lines.at(-1), "╰", "╯");
 		return {
 			list: lines.slice(1, previewRule).map(inner),
-			lastUsed: label,
+			lastUsed: label(lines[previewRule], "├", "┤"),
 			preview: lines.slice(previewRule + 1, queryRule).map(inner),
-			query: lines.slice(queryRule + 1, -1).map(inner).join("\n"),
+			// Pi's Input is one line.
+			query: inner(lines[queryRule + 1] ?? ""),
+			hints: [...lines.slice(queryRule + 2, -1).map(inner), ...(bottomLabel === undefined ? [] : [bottomLabel])],
 		};
 	}
 
@@ -792,17 +801,6 @@ export function harnessWithPrompts(t: TestContext, prompts: string[], options: H
 
 /** Test options skipping a test on Windows, for `reason`. */
 export const windowsSkip = (reason: string) => ({ skip: process.platform === "win32" ? reason : false });
-
-/** Test options skipping a test that sets the time zone: Node on Windows ignores `TZ` and keeps the system's. */
-export const needsTimeZoneSetting = windowsSkip("Node on Windows ignores the TZ variable");
-
-/**
- * Test options skipping a test that shows times, which it expects in UTC, where the harness cannot
- * make them so: on Windows (which ignores `TZ`) in a time zone other than UTC.
- */
-export const needsUtc = {
-	skip: process.platform === "win32" && new Date(T0).getTimezoneOffset() !== 0 ? "times are in the system's time zone, not UTC" : false,
-};
 
 /** Node refuses to start the stub's `.cmd` launcher without a shell, and the matcher never uses one. */
 export const needsStub = windowsSkip("the stub matcher cannot be started without a shell on Windows");
