@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { restoreSkillInvocation } from "./skill-restoration.ts";
 
 /** Pi's documented environment override for the session directory. */
 const SESSION_DIR_ENV = "PI_CODING_AGENT_SESSION_DIR";
@@ -15,8 +16,9 @@ const SESSION_DIR_ENV = "PI_CODING_AGENT_SESSION_DIR";
  */
 export type Scope = "repo" | "global";
 
-/** One unique user-typed prompt with the time and working directory of its most recent use. */
+/** One unique user-typed prompt, after restoration, with the time and working directory of its most recent use. */
 export interface HistoryRecord {
+	/** The prompt as stored, or the command it was typed as when it began with a skill invocation (see `restoreSkillInvocation`). */
 	text: string;
 	/** Unix time in milliseconds of the most recent use. */
 	timestamp: number;
@@ -109,7 +111,7 @@ function resolveUserPath(path: string, cwd: string): string {
 }
 
 export interface HistorySource {
-	/** The scope's records newest first, de-duplicated on their text, at most the record limit of them. */
+	/** The scope's records newest first, restored and then de-duplicated on their text, at most the record limit of them. */
 	load(scope: Scope, context: SessionContext, signal?: AbortSignal): Promise<HistoryRecord[]>;
 }
 
@@ -245,12 +247,13 @@ interface StorageState {
 /**
  * The history source's state for `storage`, kept in process-wide state: Pi re-imports the
  * extension's module at every session start (`/new`, `/resume`, `/fork`, `/reload`), so it lives on
- * `globalThis`, under a key versioned with its shape, so an extension updated by `/reload` never
- * reads state an older one left behind.
+ * `globalThis`, under a key versioned with its shape and with what its records hold, so an
+ * extension updated by `/reload` never reads state an older one left behind (v2: records hold
+ * restored skill invocations).
  */
 function storageState(storage: SessionStorage): StorageState {
 	const global = globalThis as typeof globalThis & Record<symbol, Map<string, StorageState> | undefined>;
-	const states = (global[Symbol.for("pi-history.storageStates.v1")] ??= new Map());
+	const states = (global[Symbol.for("pi-history.storageStates.v2")] ??= new Map());
 	const key = JSON.stringify(storage);
 	let state = states.get(key);
 	if (!state) {
@@ -475,12 +478,18 @@ function userPrompts(entries: readonly unknown[], cwd: string): HistoryRecord[] 
 	return entries.flatMap((entry) => userPromptOf(entry, cwd) ?? []);
 }
 
+/**
+ * The prompt a session entry holds, if it is a user message with text: its text restored (see
+ * `restoreSkillInvocation`), before it is de-duplicated or cached, so every use of a record (the
+ * list, the matcher's input, the confirmed text) sees the command that was typed.
+ */
 function userPromptOf(entry: unknown, cwd: string): HistoryRecord | undefined {
 	if (!isObject(entry) || entry.type !== "message" || !isObject(entry.message)) return undefined;
 	const message = entry.message;
 	if (message.role !== "user") return undefined;
-	const text = userMessageText(message.content);
-	if (text === undefined || text.trim() === "") return undefined;
+	const stored = userMessageText(message.content);
+	if (stored === undefined || stored.trim() === "") return undefined;
+	const text = restoreSkillInvocation(stored);
 	const timestamp =
 		typeof message.timestamp === "number"
 			? message.timestamp
