@@ -415,7 +415,64 @@ describe("switching scope", () => {
 		await h.loaded();
 		assert.equal(h.notifications.length, 1);
 		assert.equal(h.notifications[0]?.type, "warning");
-		assert.match(h.notifications[0]?.message ?? "", /search key "Up" is also tui\.select\.up \(Move selection up\)/);
+		assert.match(h.notifications[0]?.message ?? "", /search key "Up" also acts as tui\.select\.up \(Move selection up\)/);
+	});
+
+	test("a search key the terminal sends as Enter (Ctrl+M without the Kitty protocol) keeps confirming", async (t) => {
+		const h = twoRepositories(t);
+		h.writeConfig({ searchKey: "ctrl+m" });
+		await h.start();
+		h.type("draft");
+		h.press(Keys.ctrlMLegacy); // what a terminal without the Kitty protocol sends for Ctrl+M: a carriage return
+		await h.loaded();
+		h.press(Keys.clearLine);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+m confirm selection \(scope switch unavailable\) ─+╯$/);
+		assert.equal(h.notifications.length, 1);
+		assert.match(h.notifications[0]?.message ?? "", /search key "ctrl\+m" also acts as tui\.select\.confirm \(Confirm selection\)/);
+
+		h.press(Keys.ctrlMLegacy);
+		await h.flush();
+
+		assert.deepEqual(h.overlayLines(), []);
+		assert.equal(h.editorText(), "app two");
+		assert.deepEqual(h.submissions, []);
+	});
+
+	test("a search key the terminal sends as Escape (Ctrl+[ without the Kitty protocol) keeps dismissing", async (t) => {
+		const h = twoRepositories(t);
+		h.writeConfig({ searchKey: "ctrl+[" });
+		await h.start();
+		h.type("draft");
+		h.press(Keys.escape); // what a terminal without the Kitty protocol sends for Ctrl+[
+		await h.loaded();
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+\[ cancel selection \(scope switch unavailable\) ─+╯$/);
+		assert.equal(h.notifications.length, 1);
+		assert.match(h.notifications[0]?.message ?? "", /search key "ctrl\+\[" also acts as tui\.select\.cancel \(Cancel selection\)/);
+
+		h.press(Keys.escape);
+		await h.flush();
+
+		assert.deepEqual(h.overlayLines(), []);
+		assert.equal(h.editorText(), "draft");
+	});
+
+	test("with the Kitty protocol, Ctrl+M is its own key: it switches scope, and Enter still confirms", async (t) => {
+		const h = twoRepositories(t);
+		h.writeConfig({ searchKey: "ctrl+m" });
+		await h.start();
+		h.press(Keys.ctrlMKitty);
+		await h.loaded();
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+m switch to global ─+╯$/);
+
+		h.press(Keys.ctrlMKitty);
+		await h.loaded();
+		assert.match(h.modalTitle() ?? "", /History · global/);
+		h.press(Keys.enter);
+		await h.flush();
+
+		assert.deepEqual(h.overlayLines(), []);
+		assert.equal(h.editorText(), "app two");
+		assert.deepEqual(h.notifications, []);
 	});
 
 	test("a Pi keybinding that gives the search key to a list action is honoured, and the modal and a warning say so", async (t) => {
@@ -433,7 +490,7 @@ describe("switching scope", () => {
 
 		assert.deepEqual(h.overlayLines(), []);
 		assert.equal(h.notifications.length, 1);
-		assert.match(h.notifications[0]?.message ?? "", /search key "ctrl\+r" is also tui\.select\.up \(Move selection up\)/);
+		assert.match(h.notifications[0]?.message ?? "", /search key "ctrl\+r" also acts as tui\.select\.up \(Move selection up\)/);
 	});
 });
 

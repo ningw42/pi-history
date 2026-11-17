@@ -22,8 +22,8 @@ export interface EditorIntegrationOptions {
 	sessionContext: () => SessionContext;
 	/**
 	 * Tells the user, once, that the search key cannot switch scope because a list key has it;
-	 * called with undefined when no list key has it. Checked on every open, against the keybindings
-	 * in effect then (Pi reloads them after `session_start` on `/reload`).
+	 * called with undefined when no list key has it. Checked on every open, from the input the search
+	 * key sent and the keybindings in effect then (Pi reloads them after `session_start` on `/reload`).
 	 */
 	reportSearchKeyConflict: (problem: string | undefined) => void;
 }
@@ -50,7 +50,8 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 		 */
 		let pending: { modal?: HistoryModal } | undefined;
 
-		const openModal = ({ historySource, matcher, searchKey }: ConfiguredParts) => {
+		/** Open the modal for the search key, which arrived as `searchKeyInput`. */
+		const openModal = ({ historySource, matcher, searchKey }: ConfiguredParts, searchKeyInput: string) => {
 			const session: { modal?: HistoryModal } = {};
 			pending = session;
 			// The draft as the user wrote it: a collapsed paste counts with its content.
@@ -66,6 +67,7 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 							loadRecords: (scope, signal) => historySource.load(scope, options.sessionContext(), signal),
 							matcher,
 							searchKey,
+							searchKeyInput,
 							done,
 						});
 						options.reportSearchKeyConflict(conflictProblem(searchKey, session.modal.searchKeyConflict));
@@ -93,7 +95,7 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 			// Checked before the editor sees the key, so the search key wins over Pi's own bindings.
 			const configured = options.configured();
 			if (matchesKey(data, configured.searchKey)) {
-				openModal(configured);
+				openModal(configured, data);
 				return;
 			}
 			handleInput(data);
@@ -107,7 +109,8 @@ function conflictProblem(searchKey: KeyId, conflict: SearchKeyConflict | undefin
 	if (!conflict) return undefined;
 	const { keybinding, description } = conflict;
 	return (
-		`pi-history: the search key "${searchKey}" is also ${keybinding} (${description}) in your Pi keybindings. ` +
+		`pi-history: the search key "${searchKey}" also acts as ${keybinding} (${description}), through your Pi keybindings ` +
+		"or because your terminal sends the same input for both keys. " +
 		"In the history modal it keeps that action, so it cannot switch between repo and global scope. " +
 		`Set another "searchKey" in pi-history.json, or rebind ${keybinding}.`
 	);

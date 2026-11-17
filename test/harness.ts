@@ -66,6 +66,10 @@ export const Keys = {
 	escape: "\x1b",
 	ctrlR: "\x12",
 	ctrlT: "\x14",
+	/** Ctrl+M as a terminal without the Kitty keyboard protocol sends it: the same carriage return as Enter. */
+	ctrlMLegacy: "\r",
+	/** Ctrl+M under the Kitty keyboard protocol: a key of its own. */
+	ctrlMKitty: "\x1b[109;5u",
 	/** Ctrl+U, Pi's delete-to-line-start: clears a line whose cursor is at its end. */
 	clearLine: "\x15",
 } as const;

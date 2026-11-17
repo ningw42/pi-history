@@ -28,6 +28,8 @@ export interface HistoryModalOptions {
 	matcher: Matcher;
 	/** The search key, which opened the modal; inside it, it switches between the repo and global scopes. */
 	searchKey: KeyId;
+	/** The input that opened the modal: the search key as this terminal sends it. */
+	searchKeyInput: string;
 	done: (result: ModalResult) => void;
 }
 
@@ -58,31 +60,14 @@ export interface SearchKeyConflict {
 }
 
 /**
- * The list keybinding that also has `searchKey` in the effective Pi keybindings, if any. Key ids
- * are compared in one spelling (any case, modifiers in any order, Pi's `esc` and `return`
- * aliases); keys a terminal happens to send identically (such as Ctrl+M and Enter without the
- * Kitty protocol) are not detected.
+ * The list keybinding that the search key also acts as, if any: the one the search key's own
+ * input (as this terminal sent it to open the modal) matches in the effective Pi keybindings. So
+ * a shared binding counts, and so does a key the terminal sends identically, such as Ctrl+M
+ * arriving as Enter without the Kitty keyboard protocol; with the protocol they stay distinct.
  */
-export function searchKeyConflict(searchKey: KeyId, keybindings: KeybindingsManager): SearchKeyConflict | undefined {
-	const key = canonicalKey(searchKey);
-	const keybinding = LIST_KEYBINDINGS.find((name) => keybindings.getKeys(name).some((bound) => canonicalKey(bound) === key));
+export function searchKeyConflict(searchKeyInput: string, keybindings: KeybindingsManager): SearchKeyConflict | undefined {
+	const keybinding = LIST_KEYBINDINGS.find((name) => keybindings.matches(searchKeyInput, name));
 	return keybinding && { keybinding, description: keybindings.getDefinition(keybinding).description ?? keybinding };
-}
-
-const MODIFIER_ORDER = ["ctrl", "shift", "alt", "super"];
-const KEY_ALIASES: Record<string, string> = { esc: "escape", return: "enter" };
-
-/** A key id in one spelling: lower case, modifiers in a fixed order, aliases resolved. */
-function canonicalKey(keyId: string): string {
-	let key = keyId.toLowerCase();
-	const modifiers = new Set<string>();
-	for (;;) {
-		const modifier = MODIFIER_ORDER.find((name) => key.startsWith(`${name}+`) && key.length > name.length + 1);
-		if (!modifier) break;
-		modifiers.add(modifier);
-		key = key.slice(modifier.length + 1);
-	}
-	return [...MODIFIER_ORDER.filter((name) => modifiers.has(name)), KEY_ALIASES[key] ?? key].join("+");
 }
 
 /** Pause after a query edit before matching, so a burst of keys starts one matcher run. */
@@ -127,7 +112,7 @@ export class HistoryModal implements Component, Focusable {
 
 	constructor(options: HistoryModalOptions) {
 		this.options = options;
-		this.searchKeyConflict = searchKeyConflict(options.searchKey, options.keybindings);
+		this.searchKeyConflict = searchKeyConflict(options.searchKeyInput, options.keybindings);
 		const query = startingQuery(options.draft);
 		// Seeded as a bracketed paste: Input has no API to place the cursor, and a paste leaves it
 		// at the end, ready for refining.
