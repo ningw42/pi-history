@@ -3,7 +3,7 @@
 ## Documentation
 
 - Keep installation, usage, configuration and contributor workflows in `README.md`. Keep agent-only instructions here.
-- Put non-obvious design and implementation rationale beside the relevant source. Reserve `DESIGN.md` for cross-cutting decisions that cannot be explained locally; leave it empty when none remain.
+- Put non-obvious design and implementation rationale beside the relevant source. Create `DESIGN.md` only for cross-cutting decisions that cannot be explained locally; remove it when none remain.
 - Keep issue progress, implementation inventories and test-by-test reports out of project documentation.
 
 ## Changes and tests
