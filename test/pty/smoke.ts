@@ -17,9 +17,12 @@ for (const matcher of ["fzf", "sk"] as const) {
 	test(`${matcher}: Ctrl+R searches the draft, toggles scope, and Escape preserves the cursor`, async (t) => {
 		const pi = await launchPi(t, { matcher });
 		pi.text("newest");
+		const draft = await pi.waitFor((screen) => screen.split("\n").some((line) => line.trim() === "newest"));
+		const lines = draft.split("\n");
+		const row = lines.findIndex((line) => line.trim() === "newest");
+		const cursor = `${lines[row]!.indexOf("newest") + 4},${row}`; // between "newe" and "st"
 		pi.key("Left", "Left");
-		await pi.waitFor((screen) => screen.includes("newest"));
-		const cursor = pi.cursor();
+		await pi.waitFor(() => pi.cursor() === cursor);
 		pi.key("C-r");
 		await pi.waitFor((screen) => screen.includes("History · repo") && screen.includes("› newest prompt") && screen.includes("> newest"));
 		assert.ok(!pi.screen().includes("Rename session"));
@@ -28,8 +31,7 @@ for (const matcher of ["fzf", "sk"] as const) {
 		pi.text(" query-only");
 		await pi.waitFor((screen) => screen.includes("No matches"));
 		pi.key("Escape");
-		await pi.waitFor((screen) => !screen.includes("History ·") && screen.includes("newest"));
-		assert.deepEqual(pi.cursor(), cursor);
+		await pi.waitFor((screen) => !screen.includes("History ·") && screen.includes("newest") && pi.cursor() === cursor);
 		pi.text("X");
 		await pi.waitFor((screen) => screen.includes("neweXst"));
 		assert.ok(!pi.screen().includes("query-only"));
