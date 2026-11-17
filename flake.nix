@@ -60,6 +60,7 @@
               pkgs.git
               pkgs.fzf
               pkgs.skim
+              pkgs.tmux
             ]
             ++ devHooks.enabledPackages;
             shellHook = devHooks.shellHook + ''

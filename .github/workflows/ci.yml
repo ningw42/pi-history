@@ -60,5 +60,17 @@ jobs:
           esac
           if [ "$RUNNER_OS" = Windows ]; then cygpath -w "$bin" >> "$GITHUB_PATH"; else echo "$bin" >> "$GITHUB_PATH"; fi
           "$bin/sk" --version
+      - name: Install PTY host
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get install -y tmux ;;
+            macOS) brew install tmux ;;
+          esac
+          tmux -V
       - run: npm ci --ignore-scripts
       - run: npm run check
+      - name: Real-Pi PTY smoke suite
+        if: runner.os != 'Windows'
+        run: npm run test:pty
