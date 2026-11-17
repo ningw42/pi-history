@@ -354,6 +354,32 @@ describe("long records", () => {
 		}
 	});
 
+	test("ending in a long run of whitespace, before a line break or none, render whole in linear time", async (t) => {
+		/** The rendered row and preview, and the median time to render the modal, with the record `text` selected. */
+		const render = async (text: string) => {
+			const h = harnessWithPrompts(t, [text]);
+			await h.start();
+			await pressSearchKey(h);
+			const samples: number[] = [];
+			for (let i = 0; i < 5; i++) {
+				const start = performance.now();
+				h.overlayLines();
+				samples.push(performance.now() - start);
+			}
+			return { row: h.modalList()[0], preview: h.modalPreview(), ms: samples.sort((a, b) => a - b)[2] ?? Number.NaN };
+		};
+		for (const [kind, end, row, preview] of [
+			["no line break", "", `› first${" ".repeat(68)}…`, ["first"]],
+			["a line break after it", "\nsecond", "› first ↵ second", ["first", "second"]],
+		] as const) {
+			const [small, large] = [await render(`first${" ".repeat(2_500)}${end}`), await render(`first${" ".repeat(20_000)}${end}`)];
+			assert.deepEqual([small.row, small.preview, large.row, large.preview], [row, preview, row, preview], kind);
+			// 8 times the whitespace: linear work takes about 8 times as long, quadratic about 64 times.
+			// The floor absorbs timer noise on renders of a millisecond or less.
+			assert.ok(large.ms < Math.max(1, small.ms) * 24, `${kind}: ${small.ms.toFixed(2)} ms at 2,500, ${large.ms.toFixed(2)} ms at 20,000`);
+		}
+	});
+
 	test("collapse whitespace wider than the row before a line break, as they would whole", async (t) => {
 		const h = harnessWithPrompts(t, [`first${" ".repeat(200)}\nsecond`, `third${"\t".repeat(200)}\r\nfourth`]);
 		await h.start();

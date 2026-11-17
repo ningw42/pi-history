@@ -79,8 +79,12 @@ const SEARCH_DEBOUNCE_MS = 50;
 /** A line break as Pi's editor reads one: CRLF, CR or LF. */
 const LINE_BREAK = /\r\n|\r|\n/;
 const LINE_BREAKS = new RegExp(LINE_BREAK.source, "g");
-/** Line breaks with the whitespace around them, which a list row collapses into one "↵". */
-const LINE_BREAKS_AND_SPACE = new RegExp(`\\s*(?:${LINE_BREAK.source})\\s*`, "g");
+/**
+ * Runs of whitespace: a list row collapses one holding a line break into one "↵". (Matching the
+ * whitespace around a line break directly, as `\s*\n\s*`, backtracks through a long run without
+ * one at every position: quadratic time.)
+ */
+const WHITESPACE_RUNS = /\s+/g;
 /**
  * How much of the terminal's height the overlay may take, in percent. Pi drops the lines beyond
  * it, the bottom ones: the query line and key hints first.
@@ -526,16 +530,23 @@ function wrapLine(text: string, start: number, width: number, needed: number): {
 
 /**
  * Collapse a multi-line record into one row, its first `width` columns as the whole record's
- * would be. Only as much of the record as fills the row is collapsed (a prefix, doubled until it
- * does), so a record of megabytes is no slower.
+ * would be: each run of whitespace holding a line break becomes one "↵", and tabs spaces. Only a
+ * prefix of the record is collapsed, doubled until it fills the row, and never ending inside a
+ * whitespace run, which collapses as a whole: a long record costs no more, though a run of
+ * whitespace within the row's width is read to its end, a line break in it being what decides.
+ * Every step is a single pass, so whitespace costs linear time, however long the run.
  */
 function oneLine(text: string, width: number): string {
 	for (let length = 2 * (width + 1); ; length *= 2) {
-		const row = text.slice(0, length).replace(LINE_BREAKS_AND_SPACE, " ↵ ").replace(/\t/g, " ");
-		if (length >= text.length) return row;
-		// Trailing whitespace may yet collapse into a line break beyond the prefix, so only what
-		// comes before it is final. Past `width` columns, nothing the prefix cut short is shown.
-		if (visibleWidth(row.trimEnd()) > width) return row;
+		const whitespace = /\s*/y; // sticky: the run of whitespace, if any, from where the prefix would end
+		whitespace.lastIndex = Math.min(length, text.length);
+		whitespace.exec(text);
+		const end = whitespace.lastIndex;
+		const row = text
+			.slice(0, end)
+			.replace(WHITESPACE_RUNS, (run) => (LINE_BREAK.test(run) ? " ↵ " : run.replace(/\t/g, " ")));
+		// Past `width` columns, a character the prefix cut short is never shown.
+		if (end >= text.length || visibleWidth(row) > width) return row;
 	}
 }
 
