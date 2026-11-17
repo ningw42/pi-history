@@ -105,27 +105,42 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 				openModal(configured, data);
 				return;
 			}
-			// The Up entry. Pi's own recall starts nowhere else, so its in-bar history is unreachable.
+			// The Up entry, where Pi's own recall would start.
 			if (startsHistoryRecall(editor, data)) {
 				openModal(configured, undefined);
 				return;
 			}
 			handleInput(data);
 		};
+		// Pi hands the input bar every prompt it submits or loads, for the editor's in-bar history.
+		// They are dropped, so no editor, whatever it lets the wrapper see, can recall one into the bar.
+		editor.addToHistory = () => {};
 		return editor;
 	});
 }
 
-/** The keys an open autocomplete popup takes for navigating its list, ahead of the editor's own bindings. */
-const AUTOCOMPLETE_KEYBINDINGS = ["tui.select.up", "tui.select.down", "tui.select.pageUp", "tui.select.pageDown"] as const;
+/**
+ * The keys an open autocomplete popup takes in Pi's editor, ahead of the editor's other bindings:
+ * closing it, moving through it and completing with its selection.
+ */
+const AUTOCOMPLETE_KEYBINDINGS = [
+	"tui.select.cancel",
+	"tui.select.up",
+	"tui.select.down",
+	"tui.select.pageUp",
+	"tui.select.pageDown",
+	"tui.input.tab",
+	"tui.select.confirm",
+] as const;
 
 /**
  * Whether `data` is where Pi's editor would start recalling its in-bar history: the key bound to
  * Pi's previous-history action (unbound by default), anywhere; or the key bound to moving the
  * cursor up, pressed at the very start of the draft (Pi recalls from the first visual row only when
  * the draft is empty or the cursor is in its first column, which is the same place). An open
- * autocomplete popup keeps the keys it navigates with. Decided from the editor's public state and
- * Pi's keybindings, as Pi's editor decides it.
+ * autocomplete popup keeps the keys it takes. Decided from the editor's public state and Pi's
+ * keybindings, as Pi's editor decides it; an editor that does not report its cursor (Pi's editor
+ * contract does not require it) gets the modal on an empty input bar only.
  */
 function startsHistoryRecall(editor: EditorComponent & Partial<Pick<Editor, "getCursor" | "isShowingAutocomplete">>, data: string): boolean {
 	const keybindings = getKeybindings();

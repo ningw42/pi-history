@@ -15,6 +15,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { HistoryRecord, Scope } from "./history-source.ts";
+import { sameKey } from "./key-syntax.ts";
 import type { MatchOutcome, Matcher } from "./matcher.ts";
 
 /** How the history modal closed. */
@@ -81,27 +82,10 @@ export function searchKeyConflict(
 ): SearchKeyConflict | undefined {
 	const hasSearchKey = (name: (typeof LIST_KEYBINDINGS)[number]) =>
 		searchKeyInput === undefined
-			? keybindings.getKeys(name).some((key) => canonicalKey(key) === canonicalKey(searchKey))
+			? keybindings.getKeys(name).some((key) => sameKey(key, searchKey))
 			: keybindings.matches(searchKeyInput, name);
 	const keybinding = LIST_KEYBINDINGS.find(hasSearchKey);
 	return keybinding && { keybinding, description: keybindings.getDefinition(keybinding).description ?? keybinding };
-}
-
-const KEY_MODIFIERS = ["ctrl", "shift", "alt", "super"] as const;
-/** Base keys Pi's key matching treats as one. */
-const KEY_ALIASES: Record<string, string> = { esc: "escape", return: "enter" };
-
-/** A key in one spelling, as Pi's key matching reads it: lower case, modifiers in a fixed order, aliases resolved. */
-function canonicalKey(key: string): string {
-	let base = key.toLowerCase();
-	const modifiers = new Set<string>();
-	for (;;) {
-		const modifier = KEY_MODIFIERS.find((name) => base.startsWith(`${name}+`) && base.length > name.length + 1);
-		if (!modifier) break;
-		modifiers.add(modifier);
-		base = base.slice(modifier.length + 1);
-	}
-	return [...KEY_MODIFIERS.filter((name) => modifiers.has(name)), KEY_ALIASES[base] ?? base].join("+");
 }
 
 /** Pause after a query edit before matching, so a burst of keys starts one matcher run. */

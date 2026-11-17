@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type { KeyId } from "@earendil-works/pi-tui";
+import { isKeyId } from "./key-syntax.ts";
 import { MATCHER_NAMES, type MatcherName } from "./matcher.ts";
 
 /** The configuration file's name in Pi's agent directory. */
@@ -112,37 +113,6 @@ function commandOf(value: unknown, agentDir: string): string | undefined {
 	if (value.startsWith("~/")) return join(homedir(), value.slice(2));
 	if (isAbsolute(value) || !/[/\\]/.test(value)) return value;
 	return resolve(agentDir, value);
-}
-
-const MODIFIERS = ["ctrl", "shift", "alt", "super"];
-/** Every base key of Pi's keybinding syntax, lower-cased as Pi compares them. */
-const BASE_KEYS = new Set([
-	..."abcdefghijklmnopqrstuvwxyz0123456789",
-	..."`-=[]\\;',./!@#$%^&*()_+|~{}:<>?",
-	...["escape", "esc", "enter", "return", "tab", "space", "backspace", "delete", "insert", "clear"],
-	...["home", "end", "pageup", "pagedown", "up", "down", "left", "right"],
-	...Array.from({ length: 12 }, (_, i) => `f${i + 1}`),
-]);
-
-/** Escape and its alias, which Pi's key matching never recognizes with any modifier. */
-const UNMODIFIABLE_KEYS = new Set(["escape", "esc"]);
-
-/**
- * Whether `value` is a key Pi can recognize: in Pi's keybinding syntax (modifiers, each at most
- * once, then a base key), and not a combination Pi's key matching rejects outright.
- */
-function isKeyId(value: unknown): value is KeyId {
-	if (typeof value !== "string") return false;
-	let key = value.toLowerCase();
-	const used = new Set<string>();
-	for (;;) {
-		const modifier = MODIFIERS.find((name) => key.startsWith(`${name}+`) && key.length > name.length + 1);
-		if (!modifier) break;
-		if (used.has(modifier)) return false;
-		used.add(modifier);
-		key = key.slice(modifier.length + 1);
-	}
-	return BASE_KEYS.has(key) && !(used.size > 0 && UNMODIFIABLE_KEYS.has(key));
 }
 
 function errorMessage(error: unknown): string {

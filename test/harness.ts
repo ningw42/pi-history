@@ -102,6 +102,8 @@ export const Keys = {
 	clearLine: "\x15",
 	/** Ctrl+A, Pi's cursor-to-line-start. */
 	lineStart: "\x01",
+	/** Ctrl+E, Pi's cursor-to-line-end. */
+	lineEnd: "\x05",
 	tab: "\t",
 	altP: "\x1bp",
 	altN: "\x1bn",
