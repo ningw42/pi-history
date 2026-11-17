@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { type KeybindingsManager, rawKeyHint, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
@@ -7,8 +9,10 @@ import {
 	type KeyId,
 	matchesKey,
 	type TUI,
+	sliceByColumn,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { HistoryRecord, Scope } from "./history-source.ts";
 import type { MatchOutcome, Matcher } from "./matcher.ts";
@@ -72,10 +76,23 @@ export function searchKeyConflict(searchKeyInput: string, keybindings: Keybindin
 
 /** Pause after a query edit before matching, so a burst of keys starts one matcher run. */
 const SEARCH_DEBOUNCE_MS = 50;
+/** A line break as Pi's editor reads one: CRLF, CR or LF. */
+const LINE_BREAK = /\r\n|\r|\n/;
+const LINE_BREAKS = new RegExp(LINE_BREAK.source, "g");
+/** Line breaks with the whitespace around them, which a list row collapses into one "↵". */
+const LINE_BREAKS_AND_SPACE = new RegExp(`\\s*(?:${LINE_BREAK.source})\\s*`, "g");
+/** Rows of the selected record the preview shows, terminal height permitting. */
+const PREVIEW_ROWS = 4;
 const MIN_LIST_ROWS = 3;
 const MAX_LIST_ROWS = 15;
-/** Rows the modal needs besides the list: frame, query line and its rule, and slack for Pi's chrome. */
-const RESERVED_ROWS = 12;
+/**
+ * Terminal rows the modal leaves to the list and the preview: all but its own five (the title, the
+ * rule with the last use, the rule above the query line, the query line and the key hints) and
+ * eight more, so the conversation stays in view. Down to a 12-row terminal, that keeps the modal
+ * within the 80% of the terminal the editor integration allows the overlay; Pi would drop the
+ * lines beyond it, the query line and key hints first.
+ */
+const RESERVED_ROWS = 13;
 
 /**
  * The single Pi-drawn overlay through which history is browsed and searched.
@@ -159,8 +176,13 @@ export class HistoryModal implements Component, Focusable {
 	}
 
 	/**
+	 * From top to bottom: the title, the list (its best candidate at the bottom), a rule naming the
+	 * selected record's last use, the preview of that record, a rule, the query line, and the bottom
+	 * edge with the key hints. Every row is cut to `width`, and the terminal's height is read anew,
+	 * so a resize re-renders the modal to fit.
+	 *
 	 * The frame and title take the scope's colour and the title names the scope, so the scope is
-	 * plain even where the two colours are hard to tell apart. The bottom edge names the scope the
+	 * plain even where the two colours are hard to tell apart. The key hints start with the scope the
 	 * search key switches to, or, when a list key has it, that the scope cannot be switched.
 	 */
 	render(width: number): string[] {
@@ -181,12 +203,60 @@ export class HistoryModal implements Component, Focusable {
 
 		const top = edge("╭", theme.fg(colour, theme.bold(`History · ${this.scope}`)), "╮");
 		const rule = border(`├${"─".repeat(Math.max(0, width - 2))}┤`);
+		const selected = this.selectedRecord();
+		// The label's room on the rule: the rule's own four columns and the label's padding aside.
+		const lastUse = selected ? describeLastUse(selected, width - 5) : "";
+		const previewRule = lastUse ? edge("├", theme.fg("muted", lastUse), "┤") : rule;
+		const bottom = edge("╰", this.keyHints(), "╯");
+		const { listRows, previewRows } = this.layout();
+		return [
+			top,
+			...this.renderList(inner, listRows).map(row),
+			previewRule,
+			...this.renderPreview(selected, inner, previewRows).map(row),
+			rule,
+			...this.query.render(inner).map(row),
+			bottom,
+		];
+	}
+
+	/**
+	 * The keys, in Pi's hint style: first what the search key does, which names the scope it switches
+	 * to (or, when a list key has it, that the scope cannot be switched), so it is the last to be cut
+	 * on a narrow terminal; then navigating, confirming and cancelling, each by the first key Pi's
+	 * keybindings give it, and left out when they give it none.
+	 */
+	private keyHints(): string {
+		const { keybindings, searchKey } = this.options;
 		const conflict = this.searchKeyConflict;
 		const action = conflict
 			? `${conflict.description.toLowerCase()} (scope switch unavailable)`
 			: `switch to ${otherScope(this.scope)}`;
-		const bottom = edge("╰", rawKeyHint(this.options.searchKey, action), "╯");
-		return [top, ...this.renderList().map(row), rule, ...this.query.render(inner).map(row), bottom];
+		/** The first key bound to `keybinding`; "" when none is. */
+		const firstKey = (keybinding: (typeof LIST_KEYBINDINGS)[number]) => keybindings.getKeys(keybinding)[0] ?? "";
+		const hint = (key: string, description: string) => (key ? [rawKeyHint(key, description)] : []);
+		// Pi's own hints write the arrow keys as one "↑↓".
+		const navigation = [firstKey("tui.select.up"), firstKey("tui.select.down")].filter(Boolean).map(arrow);
+		return [
+			rawKeyHint(searchKey, action),
+			...hint(navigation.join(navigation.every((key) => key.length === 1) ? "" : "/"), "navigate"),
+			...hint(firstKey("tui.select.confirm"), "confirm"),
+			...hint(firstKey("tui.select.cancel"), "cancel"),
+		].join("  ");
+	}
+
+	/**
+	 * The selected record with its line breaks, wrapped to `width`, in a fixed number of rows, so the
+	 * list above does not move as the selection does. When more of the record does not fit, the last
+	 * row ends with an ellipsis.
+	 */
+	private renderPreview(record: HistoryRecord | undefined, width: number, rows: number): string[] {
+		const { lines, more } = record ? wrapRecord(record.text, width, rows) : { lines: [], more: false };
+		const last = lines.length - 1;
+		if (more && last >= 0) {
+			lines[last] = `${truncateToWidth(lines[last] ?? "", Math.max(0, width - 2), "")} ${this.options.theme.fg("muted", "…")}`;
+		}
+		return Array.from({ length: rows }, (_, index) => lines[index] ?? "");
 	}
 
 	invalidate(): void {}
@@ -225,7 +295,7 @@ export class HistoryModal implements Component, Focusable {
 		this.options.tui.requestRender();
 	}
 
-	private renderList(): string[] {
+	private renderList(width: number, visible: number): string[] {
 		const { theme } = this.options;
 		if (this.history.kind === "loading") return [theme.fg("muted", "Loading history…")];
 		if (this.history.kind === "error") return [theme.fg("error", `Could not read history: ${this.history.message}`)];
@@ -240,27 +310,36 @@ export class HistoryModal implements Component, Focusable {
 		const { records } = this.results;
 		if (records.length === 0) return [theme.fg("muted", "No matches")];
 
-		const visible = this.listRows();
 		this.scrollOffset = Math.min(Math.max(this.scrollOffset, this.selected - visible + 1), this.selected);
 		const window = records.slice(this.scrollOffset, this.scrollOffset + visible);
-		// The best candidate sits at the bottom, next to the query line; the rest extend upwards, so
-		// Up moves both "older / lower-ranked" and visually away from the query.
+		// The best candidate is the list's bottom row, the one nearest the query line; the rest extend
+		// upwards, so Up moves both "older / lower-ranked" and visually away from the query.
 		return window
 			.map((record, offset) => {
 				const index = this.scrollOffset + offset;
-				const text = oneLine(record.text);
+				const text = oneLine(record.text, width);
 				return index === this.selected ? theme.fg("accent", `› ${text}`) : `  ${text}`;
 			})
 			.reverse();
 	}
 
-	private listRows(): number {
-		const rows = this.options.tui.terminal.rows - RESERVED_ROWS;
-		return Math.max(MIN_LIST_ROWS, Math.min(MAX_LIST_ROWS, rows));
+	/**
+	 * How many rows the list and the preview get at the terminal's current height, read at every
+	 * render, so the modal fits again after a resize. The preview gets up to `PREVIEW_ROWS`, down to
+	 * one row while the list keeps its minimum; the list gets the rest, up to `MAX_LIST_ROWS`.
+	 */
+	private layout(): { listRows: number; previewRows: number } {
+		const free = this.options.tui.terminal.rows - RESERVED_ROWS;
+		const previewRows = Math.max(1, Math.min(PREVIEW_ROWS, free - MIN_LIST_ROWS));
+		return { listRows: Math.max(MIN_LIST_ROWS, Math.min(MAX_LIST_ROWS, free - previewRows)), previewRows };
 	}
 
 	private shownRecords(): HistoryRecord[] {
 		return this.history.kind === "ready" && this.results.kind === "matches" ? this.results.records : [];
+	}
+
+	private selectedRecord(): HistoryRecord | undefined {
+		return this.shownRecords()[this.selected];
 	}
 
 	private moveSelection(delta: number): void {
@@ -325,12 +404,81 @@ export class HistoryModal implements Component, Focusable {
  * the query line changes nothing else.)
  */
 function startingQuery(draft: string): string {
-	return draft.trim() === "" ? "" : draft.replace(/\r\n|\r|\n/g, " ");
+	return draft.trim() === "" ? "" : draft.replace(LINE_BREAKS, " ");
 }
 
-/** Collapse a multi-line record into one row. */
-function oneLine(text: string): string {
-	return text.replace(/\s*\r?\n\s*/g, " ↵ ").replace(/\t/g, " ");
+/**
+ * When and where a record was last used, in at most `width` columns: its local time, then its
+ * working directory with the home directory as `~`, cut from the left if need be, so the end that
+ * names the project stays. Either is left out when its session did not record it (the history
+ * source gives such a record time 0 and directory ""); "" when both are.
+ */
+function describeLastUse(record: HistoryRecord, width: number): string {
+	const date = new Date(record.timestamp);
+	const twoDigits = (n: number) => String(n).padStart(2, "0");
+	const time =
+		record.timestamp > 0 && !Number.isNaN(date.getTime())
+			? `${date.getFullYear()}-${twoDigits(date.getMonth() + 1)}-${twoDigits(date.getDate())} ` +
+				`${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}`
+			: "";
+	const directory = shortenHome(record.cwd);
+	const before = time && directory ? `${time} · ` : time;
+	return before + truncateStart(directory, Math.max(1, width - visibleWidth(before)));
+}
+
+/** `text` in at most `width` columns: its end, after "…", when it is wider. Never splits a wide character. */
+function truncateStart(text: string, width: number): string {
+	const textWidth = visibleWidth(text);
+	return textWidth <= width ? text : `…${sliceByColumn(text, textWidth - (width - 1), width - 1, true)}`;
+}
+
+/** `path` with the home directory written as `~`. */
+function shortenHome(path: string): string {
+	const home = homedir();
+	if (!home || !path) return path;
+	if (path === home) return "~";
+	return path.startsWith(home + sep) ? `~${path.slice(home.length)}` : path;
+}
+
+/** Arrow keys as the arrows Pi's own hints show. */
+function arrow(key: string): string {
+	return key === "up" ? "↑" : key === "down" ? "↓" : key;
+}
+
+/**
+ * The first `rows` rows of `text`, its lines (broken where Pi's editor breaks them) wrapped to
+ * `width`, and whether any of it is left over. Tabs become four spaces, as in Pi's
+ * editor. Only as much of each line as can fill the rows is wrapped, so a record of megabytes is
+ * previewed as quickly as a short one.
+ */
+function wrapRecord(text: string, width: number, rows: number): { lines: string[]; more: boolean } {
+	// Every character but a zero-width one takes a column, so a line this long fills more rows than
+	// are shown. Longer lines are cut here, and then more of the record follows, whatever its rows.
+	const longest = (rows + 1) * width;
+	const lines: string[] = [];
+	for (let start = 0; lines.length <= rows; ) {
+		// Room for a line break right after the longest line, CRLF included.
+		const window = text.slice(start, start + longest + 2);
+		const lineBreak = LINE_BREAK.exec(window);
+		const cut = !lineBreak || lineBreak.index > longest;
+		const end = cut ? Math.min(window.length, longest) : lineBreak.index;
+		lines.push(...wrapTextWithAnsi(window.slice(0, end).replace(/\t/g, "    "), width));
+		if (cut) return { lines: lines.slice(0, rows), more: lines.length > rows || start + end < text.length };
+		start += end + lineBreak[0].length;
+	}
+	return { lines: lines.slice(0, rows), more: true };
+}
+
+/**
+ * Collapse a multi-line record into one row, of more than `width` columns if the record has them.
+ * Only as much of the record as fills the row is collapsed, so a record of megabytes is no slower.
+ */
+function oneLine(text: string, width: number): string {
+	for (let length = 2 * (width + 1); ; length *= 2) {
+		const row = text.slice(0, length).replace(LINE_BREAKS_AND_SPACE, " ↵ ").replace(/\t/g, " ");
+		// Beyond `width` columns, a line break or character cut short by the slice is never shown.
+		if (length >= text.length || visibleWidth(row) > width) return row;
+	}
 }
 
 function errorMessage(error: unknown): string {

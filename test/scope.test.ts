@@ -204,7 +204,7 @@ describe("switching scope", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 		assert.match(h.modalTitle() ?? "", /^╭─ History · global ─+╮$/);
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+r switch to repo ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+r switch to repo {2}/);
 		assert.deepEqual(h.modalList(), ["  app one", "  other repository", "  outside any repository", "› app two"]);
 
 		h.press(Keys.ctrlR);
@@ -381,7 +381,7 @@ describe("switching scope", () => {
 		await h.start();
 		h.press(Keys.ctrlT);
 		await h.loaded();
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+t switch to global ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+t switch to global {2}/);
 
 		h.press(Keys.ctrlR); // not the search key: switches nothing, and is not text for the query
 		await settle();
@@ -391,7 +391,7 @@ describe("switching scope", () => {
 		h.press(Keys.ctrlT);
 		await h.loaded();
 		assert.match(h.modalTitle() ?? "", /History · global/);
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+t switch to repo ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+t switch to repo {2}/);
 		assert.deepEqual(h.notifications, []);
 	});
 
@@ -401,7 +401,7 @@ describe("switching scope", () => {
 		await h.start();
 		h.press(Keys.up);
 		await h.loaded();
-		assert.match(h.modalHint() ?? "", /^╰─ Up move selection up \(scope switch unavailable\) ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ Up move selection up \(scope switch unavailable\) {2}/);
 
 		h.press(Keys.up);
 		await settle();
@@ -426,7 +426,7 @@ describe("switching scope", () => {
 		h.press(Keys.ctrlMLegacy); // what a terminal without the Kitty protocol sends for Ctrl+M: a carriage return
 		await h.loaded();
 		h.press(Keys.clearLine);
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+m confirm selection \(scope switch unavailable\) ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+m confirm selection \(scope switch unavailable\) {2}/);
 		assert.equal(h.notifications.length, 1);
 		assert.match(h.notifications[0]?.message ?? "", /search key "ctrl\+m" also acts as tui\.select\.confirm \(Confirm selection\)/);
 
@@ -445,7 +445,7 @@ describe("switching scope", () => {
 		h.type("draft");
 		h.press(Keys.escape); // what a terminal without the Kitty protocol sends for Ctrl+[
 		await h.loaded();
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+\[ cancel selection \(scope switch unavailable\) ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+\[ cancel selection \(scope switch unavailable\) {2}/);
 		assert.equal(h.notifications.length, 1);
 		assert.match(h.notifications[0]?.message ?? "", /search key "ctrl\+\[" also acts as tui\.select\.cancel \(Cancel selection\)/);
 
@@ -462,7 +462,7 @@ describe("switching scope", () => {
 		await h.start();
 		h.press(Keys.ctrlMKitty);
 		await h.loaded();
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+m switch to global ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+m switch to global {2}/);
 
 		h.press(Keys.ctrlMKitty);
 		await h.loaded();
@@ -479,7 +479,7 @@ describe("switching scope", () => {
 		const h = twoRepositories(t, { keybindings: { "tui.select.up": "ctrl+r" } });
 		await h.start();
 		await open(h);
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+r move selection up \(scope switch unavailable\) ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+r move selection up \(scope switch unavailable\) {2}/);
 
 		h.press(Keys.ctrlR);
 		await settle();
@@ -553,7 +553,7 @@ describe("the scope indicator", () => {
 		await h.loaded();
 
 		assert.match(h.modalTitle() ?? "", /^╭─ History · repo ─+╮$/);
-		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+r switch to global ─+╯$/);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+r switch to global {2}/);
 	});
 
 	test("the frame and title share one colour per scope, different between the scopes", async (t) => {

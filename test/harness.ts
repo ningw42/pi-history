@@ -14,9 +14,13 @@
  * directory would share one repo scope.
  *
  * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
- * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalQuery()`,
- * `modalHint()`; empty or undefined when no overlay is shown), the colours of the modal's frame and
- * title (`modalColours()`), and whether the modal places the terminal cursor (`modalShowsCursor()`). Like Pi,
+ * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalLastUsed()`,
+ * `modalPreview()`, `modalQuery()`, `modalHint()`; empty or undefined when no overlay is shown), the
+ * colours of the modal's frame and title (`modalColours()`) and of each list row
+ * (`modalListColours()`), and whether the modal places the terminal cursor (`modalShowsCursor()`).
+ * The terminal can be resized (`resize()`). Times are shown in UTC unless a test sets `TZ`; Node on
+ * Windows ignores `TZ`, so tests showing times skip there unless the system's zone is UTC
+ * (`needsUtc`), and tests setting another zone skip there (`needsTimeZoneSetting`). Like Pi,
  * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
  * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
  * boundaries, for behaviour that has no visible output: prompts handed to Pi for submission
@@ -242,6 +246,9 @@ export class Harness {
 		// Pi's session-directory override must not leak in from the host: it would point the
 		// extension at real history. Tests that need it set it explicitly with setEnv().
 		this.setEnv("PI_CODING_AGENT_SESSION_DIR", undefined);
+		// Times are shown in local time; a fixed zone makes them the same on every machine (but on
+		// Windows, where Node ignores TZ: see needsUtc).
+		this.setEnv("TZ", "UTC");
 		this.installStubMatcher(options.stubMatcher ?? {});
 
 		initTheme("dark", false);
@@ -268,13 +275,16 @@ export class Harness {
 
 	/**
 	 * Write a synthetic session file holding `entries` after its header, as Pi lays them out: one
-	 * JSON line each. Stored at `path`, or in `dir`, or in Pi's default per-cwd directory.
+	 * JSON line each. Stored at `path`, or in `dir`, or in Pi's default per-cwd directory. Without a
+	 * `cwd` the header records none, and the file is stored in the current session directory.
 	 */
-	writeSessionEntries(spec: { cwd: string; entries: SessionEntry[]; dir?: string; path?: string }): string {
+	writeSessionEntries(spec: { cwd?: string; entries: SessionEntry[]; dir?: string; path?: string }): string {
 		const n = ++this.sessionCounter;
 		const id = `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 		const first = spec.entries[0]?.timestamp ?? new Date(0).toISOString();
-		const dir = spec.dir ?? (this.options.customSessionDir ? this.sessionDir : defaultSessionDir(this.agentDir, spec.cwd));
+		const dir =
+			spec.dir ??
+			(this.options.customSessionDir || spec.cwd === undefined ? this.sessionDir : defaultSessionDir(this.agentDir, spec.cwd));
 		const file = spec.path ?? join(dir, sessionFileName(first, id));
 		mkdirSync(dirname(file), { recursive: true });
 		const header = { type: "session", version: 3, id, timestamp: first, cwd: spec.cwd };
@@ -368,9 +378,24 @@ export class Harness {
 		return this.overlay?.component.render(width).map((line) => stripAnsi(line).trimEnd()) ?? [];
 	}
 
-	/** Rendered rows of the modal's list area (above the query line), without frame characters. */
+	/** Rendered rows of the modal's list area (between the title and the rule above the preview), without frame characters. */
 	modalList(width = 80): string[] {
 		return this.modalSections(width).list;
+	}
+
+	/**
+	 * Rendered rows of the modal's preview (between the list and the query line), without frame
+	 * characters and with trailing empty rows dropped; empty when no modal is shown.
+	 */
+	modalPreview(width = 80): string[] {
+		const { preview } = this.modalSections(width);
+		while (preview.at(-1) === "") preview.pop();
+		return preview;
+	}
+
+	/** The label on the rule above the preview (the selected record's last use); undefined when it has none. */
+	modalLastUsed(width = 80): string | undefined {
+		return this.modalSections(width).lastUsed;
 	}
 
 	/** The modal's query line as rendered, without frame characters; undefined when no modal is shown. */
@@ -403,6 +428,13 @@ export class Harness {
 		const top = lines[0] ?? [];
 		const title = top[top.map(({ char }) => char).join("").indexOf("History")];
 		return { frame: [...frame], title: title?.fg };
+	}
+
+	/** For each rendered list row, every foreground colour its visible characters (frame and spaces aside) are drawn in. */
+	modalListColours(width = 80): string[][] {
+		const rows = this.modalList(width).length; // below the title
+		const lines = (this.overlay?.component.render(width) ?? []).slice(1, 1 + rows).map(coloursOf);
+		return lines.map((line) => [...new Set(line.slice(1, -1).flatMap(({ char, fg }) => (char.trim() === "" ? [] : [fg])))]);
 	}
 
 	/** Make `relative` (below the harness root) the top-level directory of a git repository. */
@@ -449,20 +481,43 @@ export class Harness {
 		return dir;
 	}
 
+	/** Give the terminal `rows` rows, as a resize does; the next render reads them. (Tests choose the width at each render.) */
+	resize(rows: number): void {
+		this.tui.terminal.rows = rows;
+	}
+
 	/** Move Pi's focus off the shown overlay (as when another component takes it) or back onto it. */
 	setOverlayFocus(focused: boolean): void {
 		if (!this.overlay) throw new Error("no overlay is shown");
 		setFocused(this.overlay.component, focused);
 	}
 
-	/** The overlay frame's rows, split at the rule above the query line. */
-	private modalSections(width: number): { list: string[]; query: string | undefined } {
+	/**
+	 * The overlay frame's rows, split at its two rules: the list above the first, the preview between
+	 * them (the first rule's label is the selected record's last use), the query line below the second.
+	 */
+	private modalSections(width: number): {
+		list: string[];
+		lastUsed: string | undefined;
+		preview: string[];
+		query: string | undefined;
+	} {
 		const lines = this.overlayLines(width);
-		if (lines.length === 0) return { list: [], query: undefined };
-		const rule = lines.findIndex((line) => line.startsWith("├"));
-		if (rule === -1) throw new Error(`no query line in the rendered modal:\n${lines.join("\n")}`);
+		if (lines.length === 0) return { list: [], lastUsed: undefined, preview: [], query: undefined };
+		const rules = lines.flatMap((line, index) => (line.startsWith("├") ? [index] : []));
+		const [previewRule, queryRule] = rules;
+		if (rules.length !== 2 || previewRule === undefined || queryRule === undefined) {
+			throw new Error(`expected a list, a preview and a query line in the rendered modal:\n${lines.join("\n")}`);
+		}
 		const inner = (line: string) => line.replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd();
-		return { list: lines.slice(1, rule).map(inner), query: lines.slice(rule + 1, -1).map(inner).join("\n") };
+		// A label too wide for the rule is truncated with "…", without its trailing space.
+		const label = /^├─ (.*?) ?─*┤$/u.exec(lines[previewRule] ?? "")?.[1];
+		return {
+			list: lines.slice(1, previewRule).map(inner),
+			lastUsed: label,
+			preview: lines.slice(previewRule + 1, queryRule).map(inner),
+			query: lines.slice(queryRule + 1, -1).map(inner).join("\n"),
+		};
 	}
 
 	/** Let pending promise callbacks run (a confirmed record is applied once the overlay resolves). */
@@ -737,6 +792,17 @@ export function harnessWithPrompts(t: TestContext, prompts: string[], options: H
 
 /** Test options skipping a test on Windows, for `reason`. */
 export const windowsSkip = (reason: string) => ({ skip: process.platform === "win32" ? reason : false });
+
+/** Test options skipping a test that sets the time zone: Node on Windows ignores `TZ` and keeps the system's. */
+export const needsTimeZoneSetting = windowsSkip("Node on Windows ignores the TZ variable");
+
+/**
+ * Test options skipping a test that shows times, which it expects in UTC, where the harness cannot
+ * make them so: on Windows (which ignores `TZ`) in a time zone other than UTC.
+ */
+export const needsUtc = {
+	skip: process.platform === "win32" && new Date(T0).getTimezoneOffset() !== 0 ? "times are in the system's time zone, not UTC" : false,
+};
 
 /** Node refuses to start the stub's `.cmd` launcher without a shell, and the matcher never uses one. */
 export const needsStub = windowsSkip("the stub matcher cannot be started without a shell on Windows");
