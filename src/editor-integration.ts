@@ -8,7 +8,7 @@ import type { Matcher } from "./matcher.ts";
 export interface ConfiguredParts {
 	historySource: HistorySource;
 	matcher: Matcher;
-	/** Key that opens the history modal while the input bar has focus. */
+	/** Key that opens the history modal while the input bar has focus, and switches its scope inside it. */
 	searchKey: KeyId;
 }
 
@@ -18,7 +18,7 @@ export interface EditorIntegrationOptions {
 	 * install before any I/O and read the configuration right afterwards, in the same synchronous step.
 	 */
 	configured: () => ConfiguredParts;
-	/** Where the sessions for the current directory live, resolved when the modal opens. */
+	/** The current directory and Pi's session storage, resolved at every load (on opening the modal and on each scope switch). */
 	sessionContext: () => SessionContext;
 }
 
@@ -44,7 +44,7 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 		 */
 		let pending: { modal?: HistoryModal } | undefined;
 
-		const openModal = ({ historySource, matcher }: ConfiguredParts) => {
+		const openModal = ({ historySource, matcher, searchKey }: ConfiguredParts) => {
 			const session: { modal?: HistoryModal } = {};
 			pending = session;
 			// The draft as the user wrote it: a collapsed paste counts with its content.
@@ -57,8 +57,9 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 							theme: modalTheme,
 							keybindings: modalKeybindings,
 							draft,
-							loadRecords: (signal) => historySource.load(options.sessionContext(), signal),
+							loadRecords: (scope, signal) => historySource.load(scope, options.sessionContext(), signal),
 							matcher,
+							searchKey,
 							done,
 						});
 						return session.modal;

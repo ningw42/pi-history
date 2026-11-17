@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { type HarnessOptions, harnessWithPrompts, Keys, needsStub, type StubMatcherCall, windowsSkip } from "./harness.ts";
-
-/** Long enough for a debounced matcher run to have started, were one going to. */
-const SETTLE_MS = 300;
-const settle = () => new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+import {
+	type HarnessOptions,
+	harnessWithPrompts,
+	Keys,
+	needsStub,
+	type StubMatcherCall,
+	settle,
+	windowsSkip,
+} from "./harness.ts";
 
 /** The query a matcher invocation was given. */
 function queryOf(call: StubMatcherCall): string | undefined {

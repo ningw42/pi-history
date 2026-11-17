@@ -6,11 +6,14 @@
  * no real prompt history is ever read. The extension's configuration file is read from that
  * agent directory too (`writeConfig()`), so the user's real configuration never applies. The fake mirrors Pi's overlay lifecycle: the overlay is
  * mounted and focused asynchronously, and closing it gives focus back to the editor before the
- * result promise settles.
+ * result promise settles. Git repositories are synthetic too (`makeGitRepo()`, `makeGitWorktree()`,
+ * `makeGitSubmodule()`), and the harness refuses to run in a temporary directory inside a git
+ * repository, where every test directory would share one repo scope.
  *
  * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
- * rendered overlay lines (`overlayLines()`, `modalList()`, `modalQuery()`; empty when no overlay is
- * shown), including whether the modal places the terminal cursor (`modalShowsCursor()`). Like Pi,
+ * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalQuery()`,
+ * `modalHint()`; empty or undefined when no overlay is shown), the colours of the modal's frame and
+ * title (`modalColours()`), and whether the modal places the terminal cursor (`modalShowsCursor()`). Like Pi,
  * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
  * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
  * boundaries, for behaviour that has no visible output: prompts handed to Pi for submission
@@ -20,13 +23,14 @@
  * extension's private state.
  *
  * A scripted stub is always on PATH as `fzf` and `sk`, so on Linux and macOS no harness test
- * reaches a real matcher. On Windows the extension cannot start the stub's `.cmd` launcher: tests
+ * reaches a real matcher. Its responses are chosen by query and, optionally, by a record its input
+ * must hold, so a run over one scope's records can be told from a run over the other's. On Windows the extension cannot start the stub's `.cmd` launcher: tests
  * that need the stub's answers are skipped there, and a test that opens the modal with a draft may
  * start whatever fzf is on PATH, without depending on its outcome.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, dirname, join, relative as relativePath, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	type ExtensionAPI,
@@ -64,6 +68,9 @@ export const Keys = {
 	clearLine: "\x15",
 } as const;
 
+/** Wait long enough for a debounced matcher run to have started, were one going to. */
+export const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+
 const T0 = Date.UTC(2026, 10, 1, 9, 0, 0);
 /** A timestamp for synthetic prompts: `n` minutes after a fixed point in time. */
 export const minutesAfterT0 = (n: number) => T0 + n * 60_000;
@@ -88,6 +95,8 @@ export interface SessionSpec {
 
 export interface StubMatcherResponse {
 	query?: string;
+	/** Use this response only when the stub is given this record. */
+	input?: string;
 	output?: string[];
 	exitCode?: number;
 	delayMs?: number;
@@ -154,6 +163,7 @@ export class Harness {
 	constructor(options: HarnessOptions = {}) {
 		this.options = options;
 		this.root = mkdtempSync(join(tmpdir(), "pi-history-test-"));
+		assertOutsideGitRepository(this.root);
 		this.agentDir = join(this.root, "agent");
 		this.cwd = join(this.root, options.cwd ?? "work/project");
 		mkdirSync(this.cwd, { recursive: true });
@@ -302,6 +312,66 @@ export class Harness {
 	/** Whether the rendered modal places the terminal cursor (Pi's cursor marker), as on a focused text input. */
 	modalShowsCursor(width = 80): boolean {
 		return this.overlay?.component.render(width).some((line) => line.includes(CURSOR_MARKER)) ?? false;
+	}
+
+	/** The modal's top frame line (its title), ANSI-stripped; undefined when no modal is shown. */
+	modalTitle(width = 80): string | undefined {
+		return this.overlayLines(width)[0];
+	}
+
+	/** The modal's bottom frame line (its key hint), ANSI-stripped; undefined when no modal is shown. */
+	modalHint(width = 80): string | undefined {
+		return this.overlayLines(width).at(-1);
+	}
+
+	/**
+	 * Foreground colours as rendered (SGR sequences, "" for the terminal default): every colour used
+	 * on the modal's frame characters, and the colour of its title text.
+	 */
+	modalColours(width = 80): { frame: string[]; title: string | undefined } {
+		const lines = (this.overlay?.component.render(width) ?? []).map(coloursOf);
+		const frame = new Set(lines.flat().flatMap(({ char, fg }) => (FRAME_CHARACTERS.includes(char) ? [fg] : [])));
+		const top = lines[0] ?? [];
+		const title = top[top.map(({ char }) => char).join("").indexOf("History")];
+		return { frame: [...frame], title: title?.fg };
+	}
+
+	/** Make `relative` (below the harness root) the top-level directory of a git repository. */
+	makeGitRepo(relative: string): string {
+		const dir = this.path(relative);
+		mkdirSync(join(dir, ".git"), { recursive: true });
+		writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+		return dir;
+	}
+
+	/**
+	 * Make `relative` a linked worktree of the repository at `repo`, laid out as `git worktree add`
+	 * leaves it: its `.git` is a file pointing into the main repository's `.git` directory.
+	 */
+	makeGitWorktree(relative: string, repo: string): string {
+		const dir = this.path(relative);
+		const gitDir = join(repo, ".git", "worktrees", basename(dir));
+		mkdirSync(gitDir, { recursive: true });
+		writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/feature\n");
+		writeFileSync(join(gitDir, "commondir"), "../..\n");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, ".git"), `gitdir: ${gitDir}\n`);
+		return dir;
+	}
+
+	/**
+	 * Make `relative` a submodule checked out inside the repository at `repo`, laid out as
+	 * `git submodule add` leaves it: its `.git` is a file naming, relative to itself, the module's
+	 * git directory inside the enclosing repository's `.git`.
+	 */
+	makeGitSubmodule(relative: string, repo: string): string {
+		const dir = this.path(relative);
+		const gitDir = join(repo, ".git", "modules", basename(dir));
+		mkdirSync(gitDir, { recursive: true });
+		writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, ".git"), `gitdir: ${relativePath(dir, gitDir).split(sep).join("/")}\n`);
+		return dir;
 	}
 
 	/** Move Pi's focus off the shown overlay (as when another component takes it) or back onto it. */
@@ -498,6 +568,38 @@ export function defaultSessionDir(agentDir: string, cwd: string): string {
 	return join(agentDir, "sessions", `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
 }
 
+/** Box-drawing characters of the modal's frame. */
+const FRAME_CHARACTERS = ["╭", "╮", "╰", "╯", "│", "├", "┤", "─"];
+
+/** Each visible character of a rendered line, with the foreground SGR sequence in effect ("" for the default). */
+function coloursOf(line: string): { char: string; fg: string }[] {
+	const characters: { char: string; fg: string }[] = [];
+	let fg = "";
+	// SGR sequences (captured), other CSI sequences, OSC/APC strings, or one visible character.
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequences
+	const tokens = /\x1b\[([0-9;]*)m|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[\]_][^\x07\x1b]*(?:\x07|\x1b\\)|([\s\S])/gu;
+	for (const [sequence, sgr, char] of line.matchAll(tokens)) {
+		if (char !== undefined) characters.push({ char, fg });
+		else if (sgr === "" || sgr === "0" || sgr === "39") fg = "";
+		else if (sgr !== undefined && /^(?:3[0-7]|9[0-7]|38;.*)$/.test(sgr)) fg = sequence;
+	}
+	return characters;
+}
+
+/**
+ * Fail fast when the temporary directory is inside a git repository (a `.git` directory holding
+ * `HEAD`, or a `.git` file): every test directory would then share its repo scope.
+ */
+function assertOutsideGitRepository(dir: string): void {
+	for (let current = dir; ; current = dirname(current)) {
+		const git = join(current, ".git");
+		if (existsSync(join(git, "HEAD")) || (existsSync(git) && statSync(git).isFile())) {
+			throw new Error(`the test root ${dir} is inside the git repository at ${current}; set TMPDIR to a directory outside any repository`);
+		}
+		if (dirname(current) === current) return;
+	}
+}
+
 export function stripAnsi(text: string): string {
 	// CSI sequences, OSC/APC strings terminated by BEL or ST.
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequences
@@ -508,11 +610,15 @@ function editorTheme(): EditorTheme {
 	return { borderColor: (text) => text, selectList: getSelectListTheme() };
 }
 
-/** A theme that colours with distinct ANSI codes per token, so rendering stays realistic. */
+/** A theme that colours each token with its own 256-colour code, so rendering stays realistic and colours can be told apart. */
 function fakeTheme(): Theme {
-	const code = (name: string) => 31 + ([...name].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % 6);
+	const codes = new Map<string, number>();
+	const code = (name: string) => {
+		if (!codes.has(name)) codes.set(name, 16 + codes.size);
+		return codes.get(name);
+	};
 	return {
-		fg: (color: string, text: string) => `\x1b[${code(color)}m${text}\x1b[39m`,
+		fg: (color: string, text: string) => `\x1b[38;5;${code(color)}m${text}\x1b[39m`,
 		bg: (_color: string, text: string) => `\x1b[44m${text}\x1b[49m`,
 		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
 		italic: (text: string) => `\x1b[3m${text}\x1b[23m`,

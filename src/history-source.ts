@@ -1,10 +1,18 @@
-import { readFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { type FileHandle, open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /** Pi's documented environment override for the session directory. */
 const SESSION_DIR_ENV = "PI_CODING_AGENT_SESSION_DIR";
+
+/**
+ * Which sessions records are drawn from: repo, the sessions of the git repository containing the
+ * current working directory (or of exactly that directory outside a repository), or global, every
+ * session.
+ */
+export type Scope = "repo" | "global";
 
 /** One unique user-typed prompt with the time and working directory of its most recent use. */
 export interface HistoryRecord {
@@ -19,25 +27,35 @@ export interface HistoryRecord {
 export interface SessionContext {
 	/** Pi's current working directory. */
 	cwd: string;
-	/** Directory Pi stores this directory's sessions in; undefined means Pi's default layout. */
-	sessionDir: string | undefined;
+	/** Where Pi keeps its session files. */
+	storage: SessionStorage;
 }
 
 /**
- * Where the sessions for `ctx.cwd` live. A persisted session reports its own directory. An
- * ephemeral (`--no-session`) session reports none, so fall back to the custom directory configured
- * through Pi's documented environment variable or `sessionDir` setting, in Pi's precedence order.
- * A `--session-dir` flag given together with `--no-session` is not visible to extensions.
+ * Where Pi keeps session files: in its default layout, one directory per working directory below a
+ * root; with a custom session directory, that one directory, holding every session.
+ */
+export type SessionStorage = { layout: "default"; root: string } | { layout: "custom"; dir: string };
+
+/**
+ * The session context of a running Pi session. A persisted session reports its own session
+ * directory: one directory below `<agent dir>/sessions` in Pi's default layout, else a custom one.
+ * An ephemeral (`--no-session`) session reports none, so fall back to the custom directory
+ * configured through Pi's documented environment variable or `sessionDir` setting, in Pi's
+ * precedence order, else the default layout. A `--session-dir` flag given together with
+ * `--no-session` is not visible to extensions.
  */
 export function sessionContextOf(
 	ctx: Pick<ExtensionContext, "cwd" | "sessionManager">,
 	settingsSessionDir: string | undefined,
 ): SessionContext {
+	const root = join(getAgentDir(), "sessions");
+	const current = ctx.sessionManager.getSessionDir();
 	const configured = process.env[SESSION_DIR_ENV] || settingsSessionDir;
-	return {
-		cwd: ctx.cwd,
-		sessionDir: ctx.sessionManager.getSessionDir() || (configured ? resolveUserPath(configured, ctx.cwd) : undefined),
-	};
+	let custom: string | undefined;
+	if (current) custom = resolve(dirname(current)) === resolve(root) ? undefined : current;
+	else if (configured) custom = resolveUserPath(configured, ctx.cwd);
+	return { cwd: ctx.cwd, storage: custom ? { layout: "custom", dir: custom } : { layout: "default", root } };
 }
 
 /** Resolve a user-configured path the way Pi does: `~` expands to home, relative to `cwd`. */
@@ -48,8 +66,8 @@ function resolveUserPath(path: string, cwd: string): string {
 }
 
 export interface HistorySource {
-	/** Records newest first, de-duplicated on their text, at most the record limit of them. */
-	load(context: SessionContext, signal?: AbortSignal): Promise<HistoryRecord[]>;
+	/** The scope's records newest first, de-duplicated on their text, at most the record limit of them. */
+	load(scope: Scope, context: SessionContext, signal?: AbortSignal): Promise<HistoryRecord[]>;
 }
 
 export interface HistorySourceOptions {
@@ -58,24 +76,146 @@ export interface HistorySourceOptions {
 }
 
 /**
- * History drawn from Pi session files whose recorded working directory equals the current one.
- * Sessions are found through Pi's public session-listing API, so a custom session directory is
- * honoured. Session files are only ever read.
+ * History drawn from the Pi session files in a scope. Every session file in Pi's storage is found by
+ * listing its directories, and the working directory recorded in each file's header decides whether
+ * the session is in scope; only in-scope files are read further. Session files are only ever read.
  */
 export function createHistorySource({ recordLimit }: HistorySourceOptions): HistorySource {
 	return {
-		async load(context, signal) {
-			const cwd = resolve(context.cwd);
-			const sessions = await SessionManager.list(cwd, context.sessionDir, undefined, signal);
+		async load(scope, context, signal) {
+			const inScope = scope === "global" ? async () => true : await inRepoScopeOf(context.cwd);
 			const occurrences: HistoryRecord[] = [];
-			for (const session of sessions) {
+			for (const path of await sessionFiles(context.storage)) {
 				signal?.throwIfAborted();
-				if (!session.cwd || resolve(session.cwd) !== cwd) continue;
-				occurrences.push(...(await readUserPrompts(session.path, session.cwd)));
+				const cwd = await recordedCwd(path);
+				if (cwd === undefined || !(await inScope(cwd))) continue;
+				occurrences.push(...(await readUserPrompts(path, cwd)));
 			}
 			return dedupeNewestFirst(occurrences).slice(0, recordLimit);
 		},
 	};
+}
+
+/** Every session file in Pi's storage. A directory that cannot be listed holds none. */
+async function sessionFiles(storage: SessionStorage): Promise<string[]> {
+	const directories =
+		storage.layout === "custom"
+			? [storage.dir]
+			: (await entriesOf(storage.root))
+					.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+					.map((entry) => join(storage.root, entry.name));
+	const files = await Promise.all(
+		directories.map(async (dir) =>
+			(await entriesOf(dir)).filter((entry) => entry.name.endsWith(".jsonl")).map((entry) => join(dir, entry.name)),
+		),
+	);
+	return files.flat();
+}
+
+async function entriesOf(dir: string): Promise<Dirent[]> {
+	try {
+		return await readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+}
+
+/** Pi bounds a session header line to this many bytes, too. */
+const MAX_HEADER_BYTES = 1024 * 1024;
+const HEADER_CHUNK_BYTES = 4096;
+
+/**
+ * The working directory recorded in a session file's header, its first line, read on its own: ""
+ * when the header records none, and undefined when the file cannot be read or does not start with
+ * a session header (so it is not a session).
+ */
+async function recordedCwd(path: string): Promise<string | undefined> {
+	let file: FileHandle | undefined;
+	try {
+		file = await open(path, "r");
+		const chunks: Buffer[] = [];
+		for (let position = 0; position < MAX_HEADER_BYTES; ) {
+			const { bytesRead, buffer } = await file.read(Buffer.alloc(HEADER_CHUNK_BYTES), 0, HEADER_CHUNK_BYTES, position);
+			const chunk = buffer.subarray(0, bytesRead);
+			const newline = chunk.indexOf("\n");
+			chunks.push(newline === -1 ? chunk : chunk.subarray(0, newline));
+			if (bytesRead === 0 || newline !== -1) break;
+			position += bytesRead;
+		}
+		const header: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		if (!isObject(header) || header.type !== "session") return undefined;
+		return typeof header.cwd === "string" ? header.cwd : "";
+	} catch {
+		return undefined;
+	} finally {
+		await file?.close();
+	}
+}
+
+/**
+ * A test of whether a session recorded in a given working directory is in the repo scope of `cwd`.
+ * Inside a git repository, the recorded directory must be in that repository: its top-level
+ * directory or below, but not inside another repository nested there (a linked worktree, a
+ * submodule or any other clone checked out inside it), which is a separate repository. Outside any
+ * repository it must be exactly `cwd`. Pi records absolute directories; any other recorded
+ * directory, or none, is never in repo scope.
+ */
+async function inRepoScopeOf(cwd: string): Promise<(recorded: string) => Promise<boolean>> {
+	const here = resolve(cwd);
+	const root = await repositoryRoot(here);
+	if (root === undefined) return async (recorded) => isAbsolute(recorded) && resolve(recorded) === here;
+	const topLevels = new Map<string, Promise<boolean>>();
+	const isTopLevel = (dir: string) => {
+		if (!topLevels.has(dir)) topLevels.set(dir, isRepositoryTopLevel(dir));
+		return topLevels.get(dir) as Promise<boolean>;
+	};
+	return async (recorded) => {
+		if (!isAbsolute(recorded)) return false;
+		const path = relative(root, resolve(recorded));
+		if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) return false;
+		const parts = path === "" ? [] : path.split(sep);
+		for (let depth = 1; depth <= parts.length; depth++) {
+			if (await isTopLevel(join(root, ...parts.slice(0, depth)))) return false;
+		}
+		return true;
+	};
+}
+
+/** The top-level directory of the git repository containing `dir`: the nearest top level at or above it. */
+async function repositoryRoot(dir: string): Promise<string | undefined> {
+	for (let current = dir; ; current = dirname(current)) {
+		if (await isRepositoryTopLevel(current)) return current;
+		if (dirname(current) === current) return undefined;
+	}
+}
+
+const GITDIR_PREFIX = "gitdir: ";
+
+/**
+ * Whether `dir` is the top-level directory of a git repository, recognised as Pi recognises one:
+ * its `.git` is a directory holding `HEAD`, or a file (as in a linked worktree or a submodule) whose
+ * `gitdir:` line names a directory holding `HEAD`. Anything else, such as an empty `.git`
+ * directory, is not a repository, and the search goes on above it, as git's does.
+ */
+async function isRepositoryTopLevel(dir: string): Promise<boolean> {
+	const git = join(dir, ".git");
+	try {
+		const stats = await stat(git);
+		if (stats.isDirectory()) return await exists(join(git, "HEAD"));
+		if (!stats.isFile()) return false;
+		const content = (await readFile(git, "utf8")).trim();
+		if (!content.startsWith(GITDIR_PREFIX)) return false;
+		return await exists(join(resolve(dir, content.slice(GITDIR_PREFIX.length).trim()), "HEAD"));
+	} catch {
+		return false;
+	}
+}
+
+async function exists(path: string): Promise<boolean> {
+	return stat(path).then(
+		() => true,
+		() => false,
+	);
 }
 
 /** Every user prompt in one session file, in file order. An unreadable file yields nothing. */
