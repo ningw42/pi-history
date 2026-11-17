@@ -355,7 +355,8 @@ describe("loading a large history", () => {
 
 		const cold = await typeWhileLoading(h);
 		assert.ok(cold.typedWhileLoading >= 3, `only ${cold.typedWhileLoading} keys were handled while loading`);
-		assert.equal(h.modalQuery(), `> ${"x".repeat(cold.typedWhileLoading)}`);
+		// The query line scrolls a query wider than itself, so render it wide enough to show every letter.
+		assert.equal(h.modalQuery(cold.typedWhileLoading + 10), `> ${"x".repeat(cold.typedWhileLoading)}`);
 		assert.ok(cold.longestWaitMs < PROMPT_KEY_LATENCY_MS, `a key waited ${cold.longestWaitMs.toFixed(0)} ms on a cold load`);
 		h.press(Keys.escape);
 		await h.flush();
