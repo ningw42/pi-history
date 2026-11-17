@@ -2,6 +2,7 @@ import { constants, type Dirent } from "node:fs";
 import { access, lstat, open, readdir, readFile, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /** Pi's documented environment override for the session directory. */
@@ -125,27 +126,102 @@ export interface HistorySourceOptions {
  * file's header decides whether the session is in scope; only in-scope files are read further.
  * What is read from a file is cached until it changes (see `refreshSessionFileCache`). Session
  * files are only ever read.
+ *
+ * Loading runs on Pi's main thread in time slices (see `timeSlices`): parsing, de-duplicating and
+ * ordering the records yield to the event loop between slices, so Pi keeps handling keys and
+ * rendering however large the history is, and an aborted load stops at the next slice.
  */
 export function createHistorySource({ recordLimit }: HistorySourceOptions): HistorySource {
 	return {
 		async load(scope, context, signal) {
+			const slices = timeSlices(signal);
 			const inScope = scope === "global" ? async () => true : await inRepoScopeOf(context.cwd);
 			const { live, storage } = context;
-			const occurrences = [userPrompts(live.entries, live.cwd), [...storageState(storage).endedEphemeralPrompts.values()]];
+			const newest = new Map<string, HistoryRecord>();
+			const keepAll = async (records: Iterable<HistoryRecord>) => {
+				for (const record of records) {
+					keepNewest(newest, record);
+					if (slices.due()) await slices.next();
+				}
+			};
+			await keepAll(userPrompts(live.entries, live.cwd));
+			await keepAll(storageState(storage).endedEphemeralPrompts.values());
 			for (const [path, cached] of await refreshSessionFileCache(storage)) {
 				signal?.throwIfAborted();
+				if (slices.due()) await slices.next();
+				let prompts: HistoryRecord[];
 				try {
 					if (cached.cwd === undefined) cached.cwd = await recordedCwd(path);
 					if (cached.cwd === null || !(await inScope(cached.cwd))) continue;
-					cached.prompts ??= await readUserPrompts(path, cached.cwd);
-					occurrences.push(cached.prompts);
+					prompts = cached.prompts ??= await readUserPrompts(path, cached.cwd, slices);
 				} catch {
-					// Unreadable for now: skipped, and read again at the next load.
+					signal?.throwIfAborted();
+					continue; // Unreadable for now: skipped, and read again at the next load.
 				}
+				await keepAll(prompts);
 			}
-			return dedupeNewestFirst(occurrences.flat()).slice(0, recordLimit);
+			return newestFirst([...newest.values()], recordLimit, slices);
 		},
 	};
+}
+
+/** How long history work runs on Pi's main thread at a time before letting it handle keys and render. */
+const SLICE_MS = 8;
+
+/** Time slices for history work that would otherwise hold Pi's main thread. */
+interface TimeSlices {
+	/** Whether the current slice has run its time; checked between small units of work. */
+	due(): boolean;
+	/** Yield to the event loop, so Pi handles pending keys and renders, then start the next slice. Rejects once the load is aborted. */
+	next(): Promise<void>;
+}
+
+function timeSlices(signal: AbortSignal | undefined): TimeSlices {
+	let start = performance.now();
+	return {
+		due: () => performance.now() - start >= SLICE_MS,
+		async next() {
+			await nextTurn(undefined, { signal });
+			start = performance.now();
+		},
+	};
+}
+
+/** Records sorted in runs of this many at a time, a few milliseconds of work each. */
+const SORT_RUN = 1024;
+
+/**
+ * The newest `limit` of `records`, newest first, in time slices: sorted runs of `SORT_RUN` records
+ * are merged pairwise, each merge stopping after `limit` records. Records used at the same time
+ * keep their order, as with a stable sort.
+ */
+async function newestFirst(records: HistoryRecord[], limit: number, slices: TimeSlices): Promise<HistoryRecord[]> {
+	let runs: HistoryRecord[][] = [];
+	for (let start = 0; start < records.length; start += SORT_RUN) {
+		runs.push(records.slice(start, start + SORT_RUN).sort((a, b) => b.timestamp - a.timestamp));
+		if (slices.due()) await slices.next();
+	}
+	while (runs.length > 1) {
+		const merged: HistoryRecord[][] = [];
+		for (let i = 0; i < runs.length; i += 2) merged.push(await merge(runs[i] ?? [], runs[i + 1] ?? [], limit, slices));
+		runs = merged;
+	}
+	return (runs[0] ?? []).slice(0, limit);
+}
+
+/** The newest `limit` records of two runs sorted newest first, merged; on a tie, `first`'s record comes first. */
+async function merge(first: HistoryRecord[], second: HistoryRecord[], limit: number, slices: TimeSlices): Promise<HistoryRecord[]> {
+	const run: HistoryRecord[] = [];
+	for (let i = 0, j = 0; run.length < limit; ) {
+		const [a, b] = [first[i], second[j]];
+		const next = b === undefined || (a !== undefined && a.timestamp >= b.timestamp) ? a : b;
+		if (next === undefined) break;
+		run.push(next);
+		if (next === a) i++;
+		else j++;
+		if (slices.due()) await slices.next();
+	}
+	return run;
 }
 
 /** What has been read from one session file, kept while the file is unchanged. */
@@ -370,21 +446,25 @@ const NEWLINE = 0x0a;
 
 /**
  * Every user prompt in one session file, in file order; a malformed line holds none. Rejects when
- * the file cannot be read. Only the lines holding `USER_MARK` are decoded and parsed: tool output
- * lines can be megabytes and never hold a prompt. The bytes are scanned rather than decoding and
- * splitting the whole file, which keeps the work done on Pi's main thread small.
+ * the file cannot be read, or the load is aborted. Only the lines holding `USER_MARK` are decoded
+ * and parsed, found by scanning the bytes rather than decoding and splitting the whole file: tool
+ * output lines can be megabytes and never hold a prompt. Each parsed line is turned into its
+ * prompt at once, so nothing else it holds (such as an image) is kept, and the work yields to the
+ * event loop whenever a time slice is spent.
  */
-async function readUserPrompts(path: string, cwd: string): Promise<HistoryRecord[]> {
+async function readUserPrompts(path: string, cwd: string, slices: TimeSlices): Promise<HistoryRecord[]> {
 	const content = await readFile(path);
-	const entries: unknown[] = [];
+	const records: HistoryRecord[] = [];
 	for (let at = content.indexOf(USER_MARK); at !== -1; ) {
 		const start = content.lastIndexOf(NEWLINE, at) + 1;
 		const newline = content.indexOf(NEWLINE, at);
 		const end = newline === -1 ? content.length : newline;
-		entries.push(parseJson(content.toString("utf8", start, end)));
+		const record = userPromptOf(parseJson(content.toString("utf8", start, end)), cwd);
+		if (record) records.push(record);
 		at = content.indexOf(USER_MARK, end);
+		if (slices.due()) await slices.next();
 	}
-	return userPrompts(entries, cwd);
+	return records;
 }
 
 /**
@@ -418,13 +498,6 @@ function userMessageText(content: unknown): string | undefined {
 		.filter((block): block is { type: "text"; text: string } => isObject(block) && block.type === "text" && typeof block.text === "string")
 		.map((block) => block.text)
 		.join("");
-}
-
-/** Keep the most recent use of each distinct text, newest first. */
-function dedupeNewestFirst(occurrences: HistoryRecord[]): HistoryRecord[] {
-	const newest = new Map<string, HistoryRecord>();
-	for (const record of occurrences) keepNewest(newest, record);
-	return [...newest.values()].sort((a, b) => b.timestamp - a.timestamp);
 }
 
 /** Record a use of a text in `newest`, unless it already holds a more recent one. */

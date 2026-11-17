@@ -121,6 +121,15 @@ export function assistantEntry(id: string, parentId: string | null, timestamp: n
 	});
 }
 
+/**
+ * A prompt (`<id>u`) after the last of `entries`, answered by the assistant (`<id>a`) a millisecond
+ * later, appended to `entries`: how the harness models a conversation, on disk and in memory.
+ */
+function appendExchange(entries: SessionEntry[], id: string, text: string, timestamp: number): void {
+	entries.push(userEntry(`${id}u`, entries.at(-1)?.id ?? null, text, timestamp));
+	entries.push(assistantEntry(`${id}a`, `${id}u`, timestamp + 1));
+}
+
 /** A compaction entry: the model's context keeps only the entries from `firstKeptEntryId` on, the file keeps them all. */
 export function compactionEntry(id: string, parentId: string, firstKeptEntryId: string, timestamp: number): SessionEntry {
 	return sessionEntry("compaction", id, parentId, timestamp, {
@@ -253,12 +262,7 @@ export class Harness {
 	 */
 	writeSession(spec: SessionSpec): string {
 		const entries: SessionEntry[] = [];
-		let parentId: string | null = null;
-		spec.prompts.forEach((prompt, i) => {
-			entries.push(userEntry(`u${i}`, parentId, prompt.text, prompt.timestamp));
-			entries.push(assistantEntry(`a${i}`, `u${i}`, prompt.timestamp + 1));
-			parentId = `a${i}`;
-		});
+		spec.prompts.forEach((prompt, i) => appendExchange(entries, `p${i}`, prompt.text, prompt.timestamp));
 		return this.writeSessionEntries({ cwd: spec.cwd, entries, dir: spec.dir });
 	}
 
@@ -283,9 +287,7 @@ export class Harness {
 	 * by the assistant a moment later. Nothing is written to disk.
 	 */
 	livePrompt(text: string, timestamp: number): void {
-		const n = this.liveEntries.length;
-		this.liveEntries.push(userEntry(`live-u${n}`, this.liveEntries.at(-1)?.id ?? null, text, timestamp));
-		this.liveEntries.push(assistantEntry(`live-a${n}`, `live-u${n}`, timestamp + 1));
+		appendExchange(this.liveEntries, `live${this.liveEntries.length}`, text, timestamp);
 	}
 
 	/** The extension's configuration file, in the agent directory Pi reports. */

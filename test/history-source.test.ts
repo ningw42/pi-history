@@ -145,6 +145,33 @@ describe("every user message counts", () => {
 });
 
 describe("a session file", () => {
+	test("yields no prompt for a line that only mentions \"user\" in its JSON, such as a tool call's arguments", async (t) => {
+		const h = useHarness(t);
+		h.writeSessionEntries({
+			cwd: h.cwd,
+			entries: [
+				userEntry("u1", null, "before the tool call", minutesAfterT0(1)),
+				{
+					type: "message",
+					id: "a1",
+					parentId: "u1",
+					timestamp: new Date(minutesAfterT0(1) + 1).toISOString(),
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call-1", name: "lookup", arguments: { role: "user", user: "someone" } }],
+						timestamp: minutesAfterT0(1) + 1,
+					},
+				},
+				userEntry("u2", "a1", "after the tool call", minutesAfterT0(2)),
+			],
+		});
+		await h.start();
+
+		await open(h);
+
+		assert.deepEqual(h.modalList(), ["  before the tool call", "› after the tool call"]);
+	});
+
 	test("with a malformed line, or a last line without a line break, still yields its other prompts", async (t) => {
 		const h = useHarness(t);
 		const file = h.writeSessionEntries({ cwd: h.cwd, entries: [userEntry("u1", null, "before the damage", minutesAfterT0(1))] });
@@ -277,6 +304,68 @@ describe("the history cache", () => {
 		assert.deepEqual(h.modalList(), ["  always readable", "› readable again"]);
 		await switchScope(h);
 		assert.deepEqual(h.modalList(), ["  always readable", "  readable again", "› elsewhere"]);
+	});
+});
+
+/**
+ * Open the modal and press a key every 5 ms, as fast typing does, until its records have loaded:
+ * a letter for the query line while it still shows "Loading history…". Returns the longest wait
+ * between two keys being handled and how many letters were typed while loading.
+ */
+async function typeWhileLoading(h: Harness): Promise<{ longestWaitMs: number; typedWhileLoading: number }> {
+	h.press(Keys.ctrlR);
+	await h.flush();
+	let previous = performance.now();
+	let longestWaitMs = 0;
+	let typedWhileLoading = 0;
+	const typing = setInterval(() => {
+		const now = performance.now();
+		longestWaitMs = Math.max(longestWaitMs, now - previous);
+		previous = now;
+		if (h.modalList()[0] === "Loading history…") {
+			h.type("x");
+			typedWhileLoading++;
+		}
+	}, 5);
+	try {
+		await h.loaded();
+	} finally {
+		clearInterval(typing);
+	}
+	return { longestWaitMs, typedWhileLoading };
+}
+
+describe("loading a large history", () => {
+	/** Far above the 5 ms between keys, and far below the stall of parsing the whole history at once (about 300 ms). */
+	const PROMPT_KEY_LATENCY_MS = 100;
+
+	test("keeps handling keys and editing the query while records are read, parsed and ordered", async (t) => {
+		const h = useHarness(t);
+		// 100,000 prompts, about 50 MB, in shuffled time order, so ordering them is real work too.
+		const count = 100_000;
+		h.writeSession({
+			cwd: h.cwd,
+			prompts: Array.from({ length: count }, (_, i) => ({
+				text: `prompt ${i} ${"x".repeat(128)}`,
+				timestamp: minutesAfterT0((i * 7919) % count),
+			})),
+		});
+		h.writeConfig({ recordLimit: count });
+		await h.start();
+
+		const cold = await typeWhileLoading(h);
+		assert.ok(cold.typedWhileLoading >= 3, `only ${cold.typedWhileLoading} keys were handled while loading`);
+		assert.equal(h.modalQuery(), `> ${"x".repeat(cold.typedWhileLoading)}`);
+		assert.ok(cold.longestWaitMs < PROMPT_KEY_LATENCY_MS, `a key waited ${cold.longestWaitMs.toFixed(0)} ms on a cold load`);
+		h.press(Keys.escape);
+		await h.flush();
+
+		const cached = await typeWhileLoading(h);
+		assert.ok(cached.longestWaitMs < PROMPT_KEY_LATENCY_MS, `a key waited ${cached.longestWaitMs.toFixed(0)} ms on a cached load`);
+		h.press(Keys.clearLine);
+		// The newest is prompt 82321 (82321 × 7919 mod 100,000 = 99,999), then prompt 64642 (… = 99,998).
+		await h.waitFor(() => /^› prompt 82321 x+…$/.test(h.modalList().at(-1) ?? ""), "the newest record selected");
+		assert.match(h.modalList().at(-2) ?? "", /^ {2}prompt 64642 x+…$/);
 	});
 });
 
