@@ -35,12 +35,13 @@ describe("restoring a skill invocation", () => {
 			`/skill:code-review "naïve" café — 日本語 🚀 $1 $(whoami) \`id\``,
 		],
 		// Pi 1.5.2 writes the skill's base directory into the prologue. Its own loader sets that to the
-		// file's directory, but a skill supplied as an object (through the SDK) may have any.
+		// file's directory, but a skill supplied as an object (through the SDK) may have any, even none.
 		[
 			"a base directory other than the skill file's directory",
 			skillEnvelope({ location: "/abs/skills/code-review/SKILL.md", baseDir: "/abs/elsewhere", args: "go" }),
 			"/skill:code-review go",
 		],
+		["an empty base directory", skillEnvelope({ baseDir: "", args: "go" }), "/skill:code-review go"],
 		["a skill file with an empty body", skillEnvelope({ body: "", args: "go" }), "/skill:code-review go"],
 		[
 			"a name using every allowed kind of character",
@@ -84,7 +85,7 @@ describe("restoring a skill invocation", () => {
 		["attributes in another order", invocation.replace(`name="code-review" location="${LOCATION}"`, `location="${LOCATION}" name="code-review"`)],
 		["a missing prologue", invocation.replace(prologue, "")],
 		["a prologue in other words", invocation.replace("References are", "references are")],
-		["a prologue without a directory", invocation.replace(prologue, "References are relative to .\n\n")],
+		["a line between the opening tag and the prologue", invocation.replace(prologue, `Note.\n${prologue}`)],
 		["a prologue without its full stop", invocation.replace(prologue, "References are relative to /abs/skills/code-review\n\n")],
 		["a prologue without its blank line", invocation.replace(prologue, "References are relative to /abs/skills/code-review.\n")],
 		["a missing closing tag", invocation.replace("\n</skill>", "")],

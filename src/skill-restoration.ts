@@ -1,11 +1,11 @@
 import { isAbsolute } from "node:path";
 
-const OPEN = '<skill name="';
-const LOCATION = '" location="';
-const HEADER_END = '">\n';
+const OPENING_TAG_START = '<skill name="';
+const LOCATION_ATTRIBUTE = '" location="';
+const OPENING_TAG_END = '">\n';
 const PROLOGUE = "References are relative to ";
-const CLOSER = "\n</skill>";
-const CLOSER_LINE = "</skill>";
+const CLOSING_TAG = "</skill>";
+const CLOSING_TAG_AT_LINE_START = `\n${CLOSING_TAG}`;
 
 /** A name that can be typed back as `/skill:NAME`: letters, digits, `.`, `_`, `:` and `-`, starting with a letter or digit. */
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
@@ -19,35 +19,36 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
  *
  * That is restored to `/skill:NAME`, or `/skill:NAME ARGUMENTS` with the arguments exactly as stored.
  * DIR is the skill's base directory: Pi's own loader sets it to FILE's directory, but a skill
- * supplied as an object may have any, so it is not compared with FILE.
+ * supplied as an object may have any, even none, so it is not compared with FILE.
  *
  * Only an envelope that starts the text is restored, and only an unambiguous one: any other text,
  * including an envelope whose name could not be typed back as a command, whose FILE is not
- * absolute or whose prologue is missing, is returned as it is. The body ends at the first closing
- * tag that is followed by the end of the text or by a blank line and arguments; when the text after
- * it holds a line that is exactly the closing tag, the body might end there instead, so the
- * envelope is ambiguous. Pi's own skill-block parser is not used: it takes the first closing tag
- * and trims the arguments. Nothing but the text is consulted, so a skill that is no longer loaded
- * is restored too: history shows what was typed.
+ * absolute, or whose prologue line is missing or malformed, is returned as it is. The body ends at
+ * the first closing tag that is followed by the end of the text or by a blank line and arguments
+ * (Pi writes nothing else after its own); when the text after that one holds a line that is
+ * exactly the closing tag, the body might end there instead, so the envelope is ambiguous. Pi's
+ * own skill-block parser is not used: it takes the first closing tag and trims the arguments.
+ * Nothing but the text is consulted, so a skill that is no longer loaded is restored too: history
+ * shows what was typed.
  *
  * Linear in the length of the text, which may hold a skill body of megabytes.
  */
 export function restoreSkillInvocation(text: string): string {
-	if (!text.startsWith(OPEN)) return text;
-	const nameEnd = text.indexOf(LOCATION, OPEN.length);
+	if (!text.startsWith(OPENING_TAG_START)) return text;
+	const nameEnd = text.indexOf(LOCATION_ATTRIBUTE, OPENING_TAG_START.length);
 	if (nameEnd === -1) return text;
-	const name = text.slice(OPEN.length, nameEnd);
-	const locationStart = nameEnd + LOCATION.length;
-	const headerEnd = text.indexOf(HEADER_END, locationStart);
-	if (headerEnd === -1 || !SAFE_NAME.test(name) || !isAbsolute(text.slice(locationStart, headerEnd))) return text;
+	const name = text.slice(OPENING_TAG_START.length, nameEnd);
+	const locationStart = nameEnd + LOCATION_ATTRIBUTE.length;
+	const openingTagEnd = text.indexOf(OPENING_TAG_END, locationStart);
+	if (openingTagEnd === -1 || !SAFE_NAME.test(name) || !isAbsolute(text.slice(locationStart, openingTagEnd))) return text;
 
-	// The prologue: one line naming a directory, then a blank line.
-	const prologueStart = headerEnd + HEADER_END.length;
+	// The prologue: one line naming the base directory, then a blank line.
+	const prologueStart = openingTagEnd + OPENING_TAG_END.length;
 	const prologueEnd = text.indexOf("\n", prologueStart);
 	if (
 		prologueEnd === -1 ||
 		!text.startsWith(PROLOGUE, prologueStart) ||
-		prologueEnd - prologueStart <= PROLOGUE.length + 1 ||
+		prologueEnd - prologueStart < PROLOGUE.length + 1 ||
 		text[prologueEnd - 1] !== "." ||
 		text[prologueEnd + 1] !== "\n"
 	) {
@@ -55,23 +56,27 @@ export function restoreSkillInvocation(text: string): string {
 	}
 
 	const bodyStart = prologueEnd + 2;
-	for (let closer = text.indexOf(CLOSER, bodyStart); closer !== -1; closer = text.indexOf(CLOSER, closer + 1)) {
-		const after = closer + CLOSER.length;
+	for (
+		let closingTag = text.indexOf(CLOSING_TAG_AT_LINE_START, bodyStart);
+		closingTag !== -1;
+		closingTag = text.indexOf(CLOSING_TAG_AT_LINE_START, closingTag + 1)
+	) {
+		const after = closingTag + CLOSING_TAG_AT_LINE_START.length;
 		if (after === text.length) return `/skill:${name}`;
 		if (text.startsWith("\n\n", after) && after + 2 < text.length) {
 			const args = text.slice(after + 2);
-			return hasCloserLine(args) ? text : `/skill:${name} ${args}`;
+			return hasClosingTagLine(args) ? text : `/skill:${name} ${args}`;
 		}
 	}
 	return text;
 }
 
 /** Whether `text` holds a line that is exactly the closing tag. */
-function hasCloserLine(text: string): boolean {
+function hasClosingTagLine(text: string): boolean {
 	return (
-		text === CLOSER_LINE ||
-		text.startsWith(`${CLOSER_LINE}\n`) ||
-		text.endsWith(`\n${CLOSER_LINE}`) ||
-		text.includes(`\n${CLOSER_LINE}\n`)
+		text === CLOSING_TAG ||
+		text.startsWith(`${CLOSING_TAG}\n`) ||
+		text.endsWith(`\n${CLOSING_TAG}`) ||
+		text.includes(`\n${CLOSING_TAG}\n`)
 	);
 }
