@@ -26,7 +26,7 @@
  * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalLastUsed()`,
  * `modalPreview()`, `modalQuery()`, `modalHint()`, `modalHints()`; empty or undefined when no overlay is shown), the
  * colours of the modal's frame and title (`modalColours()`) and of each list row
- * (`modalListColours()`), and whether the modal places the terminal cursor (`modalShowsCursor()`).
+ * (`modalListColours()`), and whether and where the modal places the terminal cursor (`modalShowsCursor()`, `modalCursor()`).
  * The terminal can be resized (`resize()`), and times are shown in UTC unless a test sets `TZ`. Like Pi,
  * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
  * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
@@ -79,6 +79,7 @@ import {
 	KeybindingsManager,
 	setKeybindings,
 	TUI_KEYBINDINGS,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import piHistory from "../src/index.ts";
 
@@ -478,6 +479,16 @@ export class Harness {
 		return this.overlay?.component.render(width).some((line) => line.includes(CURSOR_MARKER)) ?? false;
 	}
 
+	/** The terminal cursor's rendered row and column in the modal, or undefined when it places none. */
+	modalCursor(width = 80): { line: number; col: number } | undefined {
+		const lines = this.overlay?.component.render(width) ?? [];
+		for (const [line, text] of lines.entries()) {
+			const marker = text.indexOf(CURSOR_MARKER);
+			if (marker >= 0) return { line, col: visibleWidth(text.slice(0, marker)) };
+		}
+		return undefined;
+	}
+
 	/** The modal's top frame line (its title), ANSI-stripped; undefined when no modal is shown. */
 	modalTitle(width = 80): string | undefined {
 		return this.overlayLines(width)[0];
@@ -635,17 +646,19 @@ export class Harness {
 			throw new Error(`expected a list, a preview and a query line in the rendered modal:\n${lines.join("\n")}`);
 		}
 		const inner = (line: string) => line.replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd();
-		// A label too wide for its edge is truncated with "…", without its trailing space.
+		// Keep list/query indicators, but remove the empty gutter from unmarked content.
+		const plain = (line: string) => inner(line).slice(2);
 		const label = (line: string | undefined, left: string, right: string) =>
-			new RegExp(`^${left}─ (.*?) ?─*${right}$`, "u").exec(line ?? "")?.[1];
+			new RegExp(`^${left}─+ (.*?) ─*${right}$`, "u").exec(line ?? "")?.[1];
 		const bottomLabel = label(lines.at(-1), "╰", "╯");
+		const list = lines.slice(1, previewRule);
 		return {
-			list: lines.slice(1, previewRule).map(inner),
+			list: list.map(list.some((line) => line.startsWith("│ › ")) ? inner : plain),
 			lastUsed: label(lines[previewRule], "├", "┤"),
-			preview: lines.slice(previewRule + 1, queryRule).map(inner),
+			preview: lines.slice(previewRule + 1, queryRule).map(plain),
 			// Pi's Input is one line.
 			query: inner(lines[queryRule + 1] ?? ""),
-			hints: [...lines.slice(queryRule + 2, -1).map(inner), ...(bottomLabel === undefined ? [] : [bottomLabel])],
+			hints: [...lines.slice(queryRule + 2, -1).map(plain), ...(bottomLabel === undefined ? [] : [bottomLabel])],
 		};
 	}
 

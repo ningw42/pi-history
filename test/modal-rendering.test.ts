@@ -29,6 +29,51 @@ async function pressSearchKey(h: Harness): Promise<void> {
 }
 
 describe("the modal's layout", () => {
+	test("aligns popup content inside matching gutters, with indicators in the left gutter", async (t) => {
+		const h = harnessWithPrompts(t, ["abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]);
+		await h.start();
+		await pressSearchKey(h);
+
+		const lines = h.overlayLines(24);
+		assert.equal(lines[1], "│   abcdefghijklmno…   │");
+		assert.equal(lines[2], "│ › ABCDEFGHIJKLMNO…   │");
+		assert.deepEqual(lines.slice(4, 8), [
+			"│   ABCDEFGHIJKLMNOP   │",
+			"│   QRSTUVWXYZ         │",
+			"│                      │",
+			"│                      │",
+		]);
+		assert.equal(lines[0], "╭── History · repo ────╮");
+		assert.ok(lines[3]?.startsWith("├── 2026-11-01"));
+		assert.ok(lines.slice(10, -1).every((line) => line.startsWith("│   ") && line.endsWith("   │")));
+		assert.equal(lines.at(-1), "╰── escape cancel ─────╯");
+		assert.ok(lines.every((line) => visibleWidth(line) === 24));
+
+		h.type("abcdefghijklmnopq");
+		assert.equal(h.overlayLines(24)[9], "│ > cdefghijklmnopq    │");
+		assert.ok(h.modalShowsCursor(24));
+	});
+
+	test("keeps exact-fit text whole and shrinks both gutters on exceptionally narrow terminals", async (t) => {
+		const h = harnessWithPrompts(t, ["abcdefghijklmnop", "abcdefghijklmnopq"]);
+		await h.start();
+		await pressSearchKey(h);
+
+		assert.deepEqual(h.overlayLines(24).slice(1, 3), [
+			"│   abcdefghijklmnop   │",
+			"│ › abcdefghijklmno…   │",
+		]);
+		h.press(Keys.up);
+		assert.deepEqual(h.overlayLines(24).slice(1, 3), [
+			"│ › abcdefghijklmnop   │",
+			"│   abcdefghijklmno…   │",
+		]);
+		for (const width of [5, 6, 7, 8, 9, 16, 24, 40, 80]) {
+			const lines = h.overlayLines(width);
+			assert.ok(lines.every((line) => visibleWidth(line) === width), `${width} columns:\n${lines.join("\n")}`);
+		}
+	});
+
 	test("title, list with the best candidate at the bottom, last use, preview, query line, key hints", async (t) => {
 		const h = useHarness(t);
 		setHome(h, h.root);
@@ -43,23 +88,79 @@ describe("the modal's layout", () => {
 
 		await pressSearchKey(h);
 
-		const home = join("~", "work", "project");
+		const home = join("work", "project");
 		assert.deepEqual(h.overlayLines(40), [
-			"╭─ History · repo ─────────────────────╮",
+			"╭── History · repo ────────────────────╮",
 			"│   older one-liner                    │",
-			"│ › fix the flaky test ↵ then run the… │",
-			`├─ 2026-11-01 09:02 · ${home} ──┤`,
-			"│ fix the flaky test                   │",
-			"│ then run the suite                   │",
+			"│ › fix the flaky test ↵ then run t…   │",
+			`├── 2026-11-01 09:02 · …${home} ──┤`,
+			"│   fix the flaky test                 │",
+			"│   then run the suite                 │",
 			"│                                      │",
 			"│                                      │",
 			"├──────────────────────────────────────┤",
 			"│ >                                    │",
-			"│ ctrl+r switch to global              │",
-			"│ ↑↓ navigate  enter confirm           │",
-			"╰─ escape cancel ──────────────────────╯",
+			"│   ctrl+r switch to global            │",
+			"│   ↑↓ navigate  enter confirm         │",
+			"╰── escape cancel ─────────────────────╯",
 		]);
 	});
+});
+
+describe("the query on exceptionally narrow terminals", () => {
+	for (const [width, contentColumn, empty, atStart] of [
+		[5, 2, "│   │", "│ a │"],
+		[6, 2, "│    │", "│ ab │"],
+		[7, 3, "│ >   │", "│ >a  │"],
+		[8, 3, "│ >    │", "│ >ab  │"],
+	] as const) {
+		test(`keeps its gutter, cursor and native editing across resizes at ${width} columns`, async (t) => {
+			const h = harnessWithPrompts(t, ["a"], { terminalRows: 200 });
+			await h.start();
+			await pressSearchKey(h);
+
+			const assertQuery = (text: string, col: number) => {
+				const lines = h.overlayLines(width);
+				const line = lines.findLastIndex((row) => row.startsWith("├")) + 1;
+				assert.equal(lines[line], text);
+				assert.deepEqual(h.modalCursor(width), { line, col });
+				assert.ok(lines.every((row) => visibleWidth(row) === width), lines.join("\n"));
+			};
+			for (const key of [Keys.lineStart, Keys.lineEnd]) {
+				h.press(key);
+				assertQuery(empty, contentColumn);
+			}
+			const lines = h.overlayLines(width);
+			const previewLine = lines.findIndex((line) => line.startsWith("├")) + 1;
+			assert.equal(lines[1]?.indexOf("a"), contentColumn);
+			assert.equal(lines[previewLine]?.indexOf("a"), contentColumn);
+
+			h.type("abc");
+			// Native Input scrolls to the end cursor alone in a one- or two-column window.
+			assertQuery(empty, contentColumn);
+			assert.equal(h.modalQuery(24), "> abc");
+			assert.equal(h.modalCursor(24)?.col, 7);
+			h.press(Keys.lineStart);
+			assertQuery(atStart, contentColumn);
+			assert.equal(h.modalQuery(24), "> abc");
+			assert.equal(h.modalCursor(24)?.col, 4);
+			h.press(Keys.lineEnd);
+			assertQuery(empty, contentColumn);
+			h.press(Keys.lineStart);
+
+			// Editing after a narrow render still uses the original native cursor and kill ring.
+			assertQuery(atStart, contentColumn);
+			h.type("X");
+			assert.equal(h.modalQuery(24), "> Xabc");
+			assert.equal(h.modalCursor(24)?.col, 5);
+			h.press(Keys.lineEnd, Keys.clearLine);
+			assertQuery(empty, contentColumn);
+			h.modalQuery(24);
+			h.press("\x19"); // Ctrl+Y: yank what Ctrl+U deleted, even after another resize.
+			assert.equal(h.modalQuery(24), "> Xabc");
+			assert.equal(h.modalCursor(24)?.col, 8);
+		});
+	}
 });
 
 describe("list rows", () => {
@@ -94,7 +195,7 @@ describe("a resized terminal", () => {
 		h.press(...Array.from({ length: 14 }, () => Keys.up)); // "prompt 6", the top row of 15
 
 		const shown: Record<number, number> = {};
-		for (const [rows, width] of [[40, 100], [24, 60], [15, 30], [12, 24], [40, 80]] as const) {
+		for (const [rows, width] of [[40, 100], [24, 60], [15, 30], [13, 24], [40, 80]] as const) {
 			h.resize(rows);
 			const lines = h.overlayLines(width);
 			const where = `${rows} rows, ${width} columns:\n${lines.join("\n")}`;
@@ -124,8 +225,8 @@ describe("a resized terminal", () => {
 		await h.waitFor(() => h.modalList().length === 10, "the results for prompt");
 		h.press(Keys.up, Keys.up); // the third best: "prompt 2"
 
-		// 71 columns fit the key hints on the bottom edge; at 60 they take a row more, at 40 two.
-		for (const [rows, width] of [[12, 80], [11, 80], [10, 80], [9, 80], [8, 80], [9, 60], [10, 40], [40, 80]] as const) {
+		// 74 columns fit the key hints on the bottom edge; at 60 they take a row more, at 40 two.
+		for (const [rows, width] of [[12, 80], [11, 80], [10, 80], [9, 80], [8, 74], [9, 73], [9, 60], [10, 40], [40, 80]] as const) {
 			h.resize(rows);
 			const lines = h.overlayLines(width);
 			const where = `${rows} rows, ${width} columns:\n${lines.join("\n")}`;
@@ -144,11 +245,11 @@ describe("the key hints", () => {
 		const h = useHarness(t);
 		await h.start();
 		await pressSearchKey(h);
-		assert.match(h.modalHint(100) ?? "", /^╰─ ctrl\+r switch to global {2}↑↓ navigate {2}enter confirm {2}escape cancel ─+╯$/);
+		assert.match(h.modalHint(100) ?? "", /^╰── ctrl\+r switch to global {2}↑↓ navigate {2}enter confirm {2}escape cancel ─+╯$/);
 
 		await pressSearchKey(h); // inside the modal: switches to global scope
 
-		assert.match(h.modalHint(100) ?? "", /^╰─ ctrl\+r switch to repo {2}↑↓ navigate {2}enter confirm {2}escape cancel ─+╯$/);
+		assert.match(h.modalHint(100) ?? "", /^╰── ctrl\+r switch to repo {2}↑↓ navigate {2}enter confirm {2}escape cancel ─+╯$/);
 	});
 
 	test("name the keys Pi's keybindings give confirming, cancelling and navigating", async (t) => {
@@ -163,7 +264,7 @@ describe("the key hints", () => {
 		await h.start();
 		await pressSearchKey(h);
 
-		assert.match(h.modalHint(100) ?? "", /^╰─ ctrl\+r switch to global {2}ctrl\+k\/ctrl\+j navigate {2}ctrl\+o confirm {2}ctrl\+g cancel ─+╯$/);
+		assert.match(h.modalHint(100) ?? "", /^╰── ctrl\+r switch to global {2}ctrl\+k\/ctrl\+j navigate {2}ctrl\+o confirm {2}ctrl\+g cancel ─+╯$/);
 	});
 
 	test("leave out a key that Pi's keybindings unbind", async (t) => {
@@ -171,7 +272,7 @@ describe("the key hints", () => {
 		await h.start();
 		await pressSearchKey(h);
 
-		assert.match(h.modalHint(100) ?? "", /^╰─ ctrl\+r switch to global {2}↓ navigate {2}escape cancel ─+╯$/);
+		assert.match(h.modalHint(100) ?? "", /^╰── ctrl\+r switch to global {2}↓ navigate {2}escape cancel ─+╯$/);
 	});
 
 	test("wrap onto rows of their own when the bottom edge is too narrow, keeping every action", async (t) => {
@@ -179,7 +280,8 @@ describe("the key hints", () => {
 		await h.start();
 		await pressSearchKey(h);
 
-		assert.deepEqual(h.modalHints(71), ["ctrl+r switch to global  ↑↓ navigate  enter confirm  escape cancel"]);
+		assert.deepEqual(h.modalHints(74), ["ctrl+r switch to global  ↑↓ navigate  enter confirm  escape cancel"]);
+		assert.deepEqual(h.modalHints(73), ["ctrl+r switch to global  ↑↓ navigate  enter confirm", "escape cancel"]);
 		assert.deepEqual(h.modalHints(60), ["ctrl+r switch to global  ↑↓ navigate  enter confirm", "escape cancel"]);
 		assert.deepEqual(h.modalHints(40), ["ctrl+r switch to global", "↑↓ navigate  enter confirm", "escape cancel"]);
 		const lines = h.overlayLines(40);
@@ -201,7 +303,7 @@ describe("the key hints", () => {
 		for (const width of [60, 40]) {
 			const hints = h.modalHints(width);
 			assert.equal(hints.join(" ").replace(/ +/g, " "), full.replace(/ +/g, " "), `${width} columns`);
-			assert.ok(hints.length > 1 && hints.every((row) => visibleWidth(row) <= width - 5), `${width} columns: ${hints.join("\n")}`);
+			assert.ok(hints.length > 1 && hints.every((row) => visibleWidth(row) <= width - 8), `${width} columns: ${hints.join("\n")}`);
 		}
 	});
 });
@@ -214,12 +316,12 @@ describe("long records", () => {
 		await h.start();
 		await pressSearchKey(h);
 
-		assert.deepEqual(h.modalList(30), ["› alpha beta gamma delta …"]);
+		assert.deepEqual(h.modalList(30), ["› alpha beta gamma delt…"]);
 		assert.deepEqual(h.modalPreview(30), [
 			"alpha beta gamma delta",
 			"epsilon zeta eta theta",
-			"iota kappa lambda mu nu xi",
-			"omicron pi rho sigma tau …",
+			"iota kappa lambda mu",
+			"nu xi omicron pi rho …",
 		]);
 	});
 
@@ -246,8 +348,8 @@ describe("long records", () => {
 		await pressSearchKey(h);
 
 		const lines = h.overlayLines(21);
-		assert.deepEqual(h.modalList(21), ["› 你好世界你好世…"]);
-		assert.deepEqual(h.modalPreview(21), ["你好世界你好世界", "你好世界你好世界"]);
+		assert.deepEqual(h.modalList(21), ["› 你好世界你好…"]);
+		assert.deepEqual(h.modalPreview(21), ["你好世界你好", "世界你好世界", "你好世界"]);
 		assert.deepEqual(
 			lines.map((line) => visibleWidth(line)),
 			lines.map(() => 21),
@@ -270,10 +372,10 @@ describe("long records", () => {
 		await h.start();
 		await pressSearchKey(h);
 
-		assert.deepEqual(h.modalPreview(30), [accented.repeat(26), accented.repeat(26), accented.repeat(18), "second line"]);
+		assert.deepEqual(h.modalPreview(30), [accented.repeat(22), accented.repeat(22), accented.repeat(22), `${accented.repeat(4)} …`]);
 		h.press(Keys.up);
-		assert.deepEqual(h.modalPreview(30), [family.repeat(12), "second line"]);
-		assert.deepEqual(h.modalList(30), [`› ${family.repeat(11)}…`, `  ${accented.repeat(23)}…`]);
+		assert.deepEqual(h.modalPreview(30), [family.repeat(11), family, "second line"]);
+		assert.deepEqual(h.modalList(30), [`› ${family.repeat(10)}…`, `  ${accented.repeat(21)}…`]);
 		const lines = h.overlayLines(30);
 		assert.deepEqual(
 			lines.map((line) => visibleWidth(line)),
@@ -321,8 +423,8 @@ describe("long records", () => {
 		for (const text of texts.toReversed()) {
 			for (const width of [30, 47, 80]) {
 				const where = `${width} columns: ${JSON.stringify(text)}`;
-				assert.equal(h.modalList(width).find((row) => row.startsWith("›")), wholeRow(text, width - 4), where);
-				assert.deepEqual(h.modalPreview(width), wholePreview(text, width - 4), where);
+				assert.equal(h.modalList(width).find((row) => row.startsWith("›")), wholeRow(text, width - 6), where);
+				assert.deepEqual(h.modalPreview(width), wholePreview(text, width - 8), where);
 			}
 			h.press(Keys.up);
 		}
@@ -396,7 +498,7 @@ describe("the preview", () => {
 		await h.start();
 		await pressSearchKey(h);
 
-		assert.equal(h.modalLastUsed(40), `2026-11-01 09:01 · …${sep}${join("nested", "project")}`);
+		assert.equal(h.modalLastUsed(40), `2026-11-01 09:01 · …sted${sep}project`);
 	});
 
 	test("leaves out a time or directory the session did not record", async (t) => {
@@ -422,10 +524,12 @@ describe("the preview", () => {
 		h.press(Keys.ctrlR);
 		await h.flush();
 		assert.deepEqual(h.modalList(), ["Loading history…"]);
+		assert.equal(h.overlayLines(24)[1], "│   Loading history…   │");
 		assert.deepEqual([h.modalPreview(), h.modalLastUsed()], [[], undefined]);
 
 		await h.loaded();
 		assert.deepEqual(h.modalList(), ["No history yet"]);
+		assert.equal(h.overlayLines(24)[1], "│   No history yet     │");
 		assert.deepEqual([h.modalPreview(), h.modalLastUsed()], [[], undefined]);
 	});
 
@@ -438,11 +542,16 @@ describe("the preview", () => {
 		h.type("none");
 		h.press(Keys.ctrlR);
 		await h.waitFor(() => h.modalList().join() === "No matches", "no matches");
+		assert.equal(h.overlayLines(24)[1], "│   No matches         │");
 		assert.deepEqual([h.modalPreview(), h.modalLastUsed()], [[], undefined]);
 
 		h.press(Keys.clearLine);
 		h.type("broken");
 		await h.waitFor(() => h.modalList()[0]?.startsWith("Search failed") ?? false, "the search to fail");
+		assert.deepEqual(h.overlayLines(24).slice(1, 3), [
+			"│   Search failed: …   │",
+			"│   Clear the query…   │",
+		]);
 		assert.deepEqual([h.modalPreview(), h.modalLastUsed()], [[], undefined]);
 	});
 });

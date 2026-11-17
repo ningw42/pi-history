@@ -203,13 +203,13 @@ describe("switching scope", () => {
 
 		h.press(Keys.ctrlR);
 		await h.loaded();
-		assert.match(h.modalTitle() ?? "", /^╭─ History · global ─+╮$/);
+		assert.match(h.modalTitle() ?? "", /^╭── History · global ─+╮$/);
 		assert.match(h.modalHints().join("  "), /^ctrl\+r switch to repo {2}/);
 		assert.deepEqual(h.modalList(), ["  app one", "  other repository", "  outside any repository", "› app two"]);
 
 		h.press(Keys.ctrlR);
 		await h.loaded();
-		assert.match(h.modalTitle() ?? "", /^╭─ History · repo ─+╮$/);
+		assert.match(h.modalTitle() ?? "", /^╭── History · repo ─+╮$/);
 		assert.deepEqual(h.modalList(), ["  app one", "› app two"]);
 	});
 
@@ -552,7 +552,7 @@ describe("the scope indicator", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.match(h.modalTitle() ?? "", /^╭─ History · repo ─+╮$/);
+		assert.match(h.modalTitle() ?? "", /^╭── History · repo ─+╮$/);
 		assert.match(h.modalHints().join("  "), /^ctrl\+r switch to global {2}/);
 	});
 
@@ -582,7 +582,7 @@ describe("the scope indicator", () => {
 		h.press(Keys.ctrlR);
 		await h.loaded();
 
-		assert.equal(h.modalTitle(16), "╭─ History · g…╮");
+		assert.equal(h.modalTitle(16), "╭── History… ──╮");
 		assert.equal(h.modalHints(16).join(" "), "ctrl+r switch to repo ↑↓ navigate enter confirm escape cancel");
 	});
 });

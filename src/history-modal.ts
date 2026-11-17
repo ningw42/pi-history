@@ -127,8 +127,8 @@ export class HistoryModal implements Component, Focusable {
 	private readonly options: HistoryModalOptions;
 	/** Set when the modal closes; then it ignores keys. */
 	private closed = false;
-	/** The query line: Pi's own single-line text input. */
-	private readonly query = new Input({ prompt: "> " });
+	/** Pi's single-line input; render the prompt separately so it follows the shrinking gutter. */
+	private readonly query = new Input({ prompt: "" });
 	/** Every open starts in repo scope. */
 	private scope: Scope = "repo";
 	/** Cancels loading the current scope's records; a scope switch supersedes it. */
@@ -211,36 +211,41 @@ export class HistoryModal implements Component, Focusable {
 	render(width: number): string[] {
 		const { theme } = this.options;
 		const inner = Math.max(1, width - 4);
+		// The selection and query indicators live in the left gutter; reserve the same room on
+		// the right. Unmarked content and frame labels align with the prompt text, not its marker.
+		const gutter = " ".repeat(Math.min(2, Math.floor((inner - 1) / 2)));
+		const contentWidth = inner - 2 * gutter.length;
+		const markedWidth = inner - gutter.length;
 		const colour = SCOPE_COLOURS[this.scope];
 		const border = (text: string) => theme.fg(colour, text);
 		const row = (content: string) => {
-			const fitted = truncateToWidth(content, inner, "…");
+			const fitted = truncateToWidth(content, markedWidth, "…");
 			return `${border("│")} ${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))} ${border("│")}`;
 		};
-		/** A horizontal edge with `label` embedded after its left corner. */
+		const plainRow = (content: string) => row(gutter + content);
+		/** A horizontal edge whose label shares the content's alignment and width. */
 		const edge = (left: string, label: string, right: string) => {
-			const room = Math.max(0, width - 3);
-			const fitted = truncateToWidth(` ${label} `, room, "…");
-			return border(`${left}─`) + fitted + border(`${"─".repeat(Math.max(0, room - visibleWidth(fitted)))}${right}`);
+			const fitted = truncateToWidth(label, contentWidth, "…");
+			const before = "─".repeat(gutter.length);
+			const after = "─".repeat(Math.max(0, width - 4 - gutter.length - visibleWidth(fitted)));
+			return border(`${left}${before} `) + fitted + border(` ${after}${right}`);
 		};
 
 		const top = edge("╭", theme.fg(colour, theme.bold(`History · ${this.scope}`)), "╮");
 		const rule = border(`├${"─".repeat(Math.max(0, width - 2))}┤`);
 		const selected = this.selectedRecord();
-		// The label's room on the rule: the rule's own four columns and the label's padding aside.
-		const lastUse = selected ? describeLastUse(selected, width - 5) : "";
+		const lastUse = selected ? describeLastUse(selected, contentWidth) : "";
 		const previewRule = lastUse ? edge("├", theme.fg("muted", lastUse), "┤") : rule;
-		// The bottom edge's label has the room of the last use's (see above).
-		const hints = packHints(this.keyHints(), width - 5);
+		const hints = packHints(this.keyHints(), contentWidth);
 		const { listRows, previewRows } = this.layout(hints.length - 1);
 		return [
 			top,
-			...this.renderList(inner, listRows).slice(0, listRows).map(row),
+			...this.renderList(markedWidth, listRows, gutter).slice(0, listRows).map(row),
 			previewRule,
-			...this.renderPreview(selected, inner, previewRows).map(row),
+			...this.renderPreview(selected, contentWidth, previewRows).map(plainRow),
 			rule,
-			...this.query.render(inner).map(row),
-			...hints.slice(0, -1).map(row),
+			...this.query.render(contentWidth).map((content) => row("> ".slice(0, gutter.length) + content)),
+			...hints.slice(0, -1).map(plainRow),
 			edge("╰", hints.at(-1) ?? "", "╯"),
 		];
 	}
@@ -321,20 +326,21 @@ export class HistoryModal implements Component, Focusable {
 		this.options.tui.requestRender();
 	}
 
-	private renderList(width: number, visible: number): string[] {
+	private renderList(width: number, visible: number, gutter: string): string[] {
 		const { theme } = this.options;
-		if (this.history.kind === "loading") return [theme.fg("muted", "Loading history…")];
-		if (this.history.kind === "error") return [theme.fg("error", `Could not read history: ${this.history.message}`)];
-		if (this.history.records.length === 0) return [theme.fg("muted", "No history yet")];
-		if (this.results.kind === "searching") return [theme.fg("muted", "Searching…")];
+		const message = (colour: ThemeColor, text: string) => gutter + theme.fg(colour, text);
+		if (this.history.kind === "loading") return [message("muted", "Loading history…")];
+		if (this.history.kind === "error") return [message("error", `Could not read history: ${this.history.message}`)];
+		if (this.history.records.length === 0) return [message("muted", "No history yet")];
+		if (this.results.kind === "searching") return [message("muted", "Searching…")];
 		if (this.results.kind === "failure") {
 			return [
-				theme.fg("error", `Search failed: ${this.results.message}`),
-				theme.fg("muted", "Clear the query to browse recent prompts"),
+				message("error", `Search failed: ${this.results.message}`),
+				message("muted", "Clear the query to browse recent prompts"),
 			];
 		}
 		const { records } = this.results;
-		if (records.length === 0) return [theme.fg("muted", "No matches")];
+		if (records.length === 0) return [message("muted", "No matches")];
 
 		// Keep the selection in view, and every row filled that can be: after a resize from a short
 		// terminal, the better candidates below the selection come back into view.
@@ -350,7 +356,7 @@ export class HistoryModal implements Component, Focusable {
 			.map((record, offset) => {
 				const index = this.scrollOffset + offset;
 				const text = oneLine(record.text, width);
-				return index === this.selected ? theme.fg("accent", `› ${text}`) : `  ${text}`;
+				return index === this.selected ? theme.fg("accent", "› ".slice(0, gutter.length) + text) : gutter + text;
 			})
 			.reverse();
 	}

@@ -49,7 +49,7 @@ describe("long records", () => {
 			return { row: h.modalList()[0], preview: h.modalPreview(), ms: samples.sort((a, b) => a - b)[2] ?? Number.NaN };
 		};
 		for (const [kind, end, row, preview] of [
-			["no line break", "", `› first${" ".repeat(68)}…`, ["first"]],
+			["no line break", "", `› first${" ".repeat(66)}…`, ["first"]],
 			["a line break after it", "\nsecond", "› first ↵ second", ["first", "second"]],
 		] as const) {
 			const [small, large] = [await render(`first${" ".repeat(2_500)}${end}`), await render(`first${" ".repeat(20_000)}${end}`)];
