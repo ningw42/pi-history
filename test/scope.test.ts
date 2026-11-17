@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { defaultSessionDir, type Harness, Keys, minutesAfterT0, needsStub, settle, useHarness } from "./harness.ts";
+import {
+	defaultSessionDir,
+	type Harness,
+	Keys,
+	minutesAfterT0,
+	needsStub,
+	settle,
+	useHarness,
+	windowsSkip,
+} from "./harness.ts";
 
 /** Write a session recorded in `relative` (below the harness root) holding one prompt, `n` minutes after T0. */
 function promptIn(h: Harness, relative: string, text: string, n: number): void {
@@ -125,10 +134,43 @@ describe("repo scope", () => {
 		assert.deepEqual(h.modalList(), ["  in the current directory", "  recorded as .", "› recorded without a directory"]);
 	});
 
+	test("recognises a repository made by git init, from a subdirectory", async (t) => {
+		const h = useHarness(t, { cwd: "code/app/src" });
+		h.gitInit("code/app");
+		promptIn(h, "code/app", "at the repository root", 1);
+		promptIn(h, "code/app/src", "in the current directory", 2);
+		promptIn(h, "code", "above the repository", 3);
+		await h.start();
+
+		await open(h);
+
+		assert.deepEqual(h.modalList(), ["  at the repository root", "› in the current directory"]);
+	});
+
+	test(
+		"recognises a repository whose HEAD is a symbolic link to an unborn branch",
+		windowsSkip("symbolic links need extra privileges on Windows"),
+		async (t) => {
+			const h = useHarness(t, { cwd: "code/app/src" });
+			const app = h.gitInit("code/app");
+			rmSync(join(app, ".git", "HEAD"));
+			symlinkSync("refs/heads/unborn", join(app, ".git", "HEAD"));
+			promptIn(h, "code/app", "at the repository root", 1);
+			promptIn(h, "code/app/src", "in the current directory", 2);
+			await h.start();
+
+			await open(h);
+
+			assert.deepEqual(h.modalList(), ["  at the repository root", "› in the current directory"]);
+		},
+	);
+
 	test("outside a git repository covers exactly the current directory", async (t) => {
 		const h = useHarness(t, { cwd: "scratch/project" });
-		// An empty .git directory is not a repository, for git as for Pi.
+		// Neither an empty .git directory nor one holding only HEAD is a repository, for git as for the extension.
+		mkdirSync(h.path("scratch/project/.git"), { recursive: true });
 		mkdirSync(h.path("scratch/.git"), { recursive: true });
+		writeFileSync(h.path("scratch/.git/HEAD"), "ref: refs/heads/main\n");
 		promptIn(h, "scratch/project", "in the current directory", 1);
 		promptIn(h, "scratch/project/sub", "in a subdirectory", 2);
 		promptIn(h, "scratch", "in the parent directory", 3);
@@ -277,7 +319,10 @@ describe("switching scope", () => {
 
 	test("records still loading for the previous scope are never shown after switching back", async (t) => {
 		const h = twoRepositories(t);
-		// A large prompt in another repository makes the global scope much slower to load than the repo scope.
+		// Were the switched-away global load not cancelled, this large prompt would make it finish after
+		// the repo load and replace its records: with it, removing the cancellation fails this test on
+		// every run; without it, the two loads race and the test usually passes anyway. With the
+		// cancellation in place, the large file is never read.
 		promptIn(h, "code/other", `large ${"x".repeat(8 * 1024 * 1024)}`, 0);
 		await h.start();
 		await open(h);
@@ -347,6 +392,98 @@ describe("switching scope", () => {
 		await h.loaded();
 		assert.match(h.modalTitle() ?? "", /History · global/);
 		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+t switch to repo ─+╯$/);
+		assert.deepEqual(h.notifications, []);
+	});
+
+	test("a search key configured onto a list key keeps the list action, and the modal and a warning say so", async (t) => {
+		const h = twoRepositories(t);
+		h.writeConfig({ searchKey: "Up" }); // any case: Pi's default for tui.select.up is "up"
+		await h.start();
+		h.press(Keys.up);
+		await h.loaded();
+		assert.match(h.modalHint() ?? "", /^╰─ Up move selection up \(scope switch unavailable\) ─+╯$/);
+
+		h.press(Keys.up);
+		await settle();
+		assert.match(h.modalTitle() ?? "", /History · repo/);
+		assert.deepEqual(h.modalList(), ["› app one", "  app two"]);
+		h.press(Keys.escape);
+		await h.flush();
+		assert.deepEqual(h.overlayLines(), []);
+
+		h.press(Keys.up); // the same conflict on a later open is not reported again
+		await h.loaded();
+		assert.equal(h.notifications.length, 1);
+		assert.equal(h.notifications[0]?.type, "warning");
+		assert.match(h.notifications[0]?.message ?? "", /search key "Up" is also tui\.select\.up \(Move selection up\)/);
+	});
+
+	test("a Pi keybinding that gives the search key to a list action is honoured, and the modal and a warning say so", async (t) => {
+		const h = twoRepositories(t, { keybindings: { "tui.select.up": "ctrl+r" } });
+		await h.start();
+		await open(h);
+		assert.match(h.modalHint() ?? "", /^╰─ ctrl\+r move selection up \(scope switch unavailable\) ─+╯$/);
+
+		h.press(Keys.ctrlR);
+		await settle();
+		assert.match(h.modalTitle() ?? "", /History · repo/);
+		assert.deepEqual(h.modalList(), ["› app one", "  app two"]);
+		h.press(Keys.escape);
+		await h.flush();
+
+		assert.deepEqual(h.overlayLines(), []);
+		assert.equal(h.notifications.length, 1);
+		assert.match(h.notifications[0]?.message ?? "", /search key "ctrl\+r" is also tui\.select\.up \(Move selection up\)/);
+	});
+});
+
+describe("a configured session directory", () => {
+	const settingPath = "../../agent/sessions/custom"; // from the harness's working directory, work/project
+	for (const [how, noSession, viaSetting] of [
+		["PI_CODING_AGENT_SESSION_DIR in a persisted session", false, false],
+		["the sessionDir setting in a persisted session", false, true],
+		["PI_CODING_AGENT_SESSION_DIR in an ephemeral session", true, false],
+		["the sessionDir setting in an ephemeral session", true, true],
+	] as const) {
+		test(`is the only storage read, even inside Pi's default session root (${how})`, async (t) => {
+			const h = useHarness(t, {
+				customSessionDir: "agent/sessions/custom",
+				noSession,
+				settings: viaSetting ? { sessionDir: settingPath } : {},
+			});
+			if (!viaSetting) h.setEnv("PI_CODING_AGENT_SESSION_DIR", h.sessionDir);
+			promptIn(h, "work/project", "configured history", 1);
+			h.writeSession({
+				cwd: h.cwd,
+				dir: defaultSessionDir(h.agentDir, h.cwd),
+				prompts: [{ text: "default layout history", timestamp: minutesAfterT0(2) }],
+			});
+			await h.start();
+
+			await open(h);
+			assert.deepEqual(h.modalList(), ["› configured history"]);
+			h.press(Keys.ctrlR);
+			await h.loaded();
+			assert.deepEqual(h.modalList(), ["› configured history"]);
+		});
+	}
+
+	test("gives way to the directory a persisted session reports, as with a --session-dir flag", async (t) => {
+		const h = useHarness(t, { customSessionDir: "flag-sessions" });
+		h.setEnv("PI_CODING_AGENT_SESSION_DIR", h.path("agent/sessions/configured"));
+		promptIn(h, "work/project", "from the reported directory", 1);
+		h.writeSession({
+			cwd: h.cwd,
+			dir: h.path("agent/sessions/configured"),
+			prompts: [{ text: "from the configured directory", timestamp: minutesAfterT0(2) }],
+		});
+		await h.start();
+
+		await open(h);
+		assert.deepEqual(h.modalList(), ["› from the reported directory"]);
+		h.press(Keys.ctrlR);
+		await h.loaded();
+		assert.deepEqual(h.modalList(), ["› from the reported directory"]);
 	});
 });
 

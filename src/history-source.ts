@@ -1,5 +1,5 @@
-import type { Dirent } from "node:fs";
-import { type FileHandle, open, readdir, readFile, stat } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { access, type FileHandle, lstat, open, readdir, readFile, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -38,12 +38,13 @@ export interface SessionContext {
 export type SessionStorage = { layout: "default"; root: string } | { layout: "custom"; dir: string };
 
 /**
- * The session context of a running Pi session. A persisted session reports its own session
- * directory: one directory below `<agent dir>/sessions` in Pi's default layout, else a custom one.
- * An ephemeral (`--no-session`) session reports none, so fall back to the custom directory
- * configured through Pi's documented environment variable or `sessionDir` setting, in Pi's
- * precedence order, else the default layout. A `--session-dir` flag given together with
- * `--no-session` is not visible to extensions.
+ * The session context of a running Pi session. The custom session directory configured through
+ * Pi's documented environment variable or `sessionDir` setting (in Pi's precedence order) is
+ * custom storage wherever it is, even inside `<agent dir>/sessions`. A persisted session reports
+ * the directory it actually uses, which wins: one directly inside `<agent dir>/sessions` that is
+ * not the configured one means Pi's default layout; any other is custom (as with a
+ * `--session-dir` flag, which extensions cannot see). An ephemeral (`--no-session`) session reports
+ * none, so the configured directory applies, else the default layout.
  */
 export function sessionContextOf(
 	ctx: Pick<ExtensionContext, "cwd" | "sessionManager">,
@@ -52,9 +53,10 @@ export function sessionContextOf(
 	const root = join(getAgentDir(), "sessions");
 	const current = ctx.sessionManager.getSessionDir();
 	const configured = process.env[SESSION_DIR_ENV] || settingsSessionDir;
+	const configuredDir = configured ? resolveUserPath(configured, ctx.cwd) : undefined;
 	let custom: string | undefined;
-	if (current) custom = resolve(dirname(current)) === resolve(root) ? undefined : current;
-	else if (configured) custom = resolveUserPath(configured, ctx.cwd);
+	if (!current) custom = configuredDir;
+	else if (resolve(current) === configuredDir || resolve(dirname(current)) !== resolve(root)) custom = current;
 	return { cwd: ctx.cwd, storage: custom ? { layout: "custom", dir: custom } : { layout: "default", root } };
 }
 
@@ -192,27 +194,54 @@ async function repositoryRoot(dir: string): Promise<string | undefined> {
 const GITDIR_PREFIX = "gitdir: ";
 
 /**
- * Whether `dir` is the top-level directory of a git repository, recognised as Pi recognises one:
- * its `.git` is a directory holding `HEAD`, or a file (as in a linked worktree or a submodule) whose
- * `gitdir:` line names a directory holding `HEAD`. Anything else, such as an empty `.git`
- * directory, is not a repository, and the search goes on above it, as git's does.
+ * Whether `dir` is the top-level directory of a git repository: its `.git` is a git directory, or a
+ * file (as in a linked worktree or a submodule) whose `gitdir:` line names one. Anything else, such
+ * as an empty `.git` directory, is not a repository, and the search goes on above it, as git's does.
  */
 async function isRepositoryTopLevel(dir: string): Promise<boolean> {
 	const git = join(dir, ".git");
 	try {
 		const stats = await stat(git);
-		if (stats.isDirectory()) return await exists(join(git, "HEAD"));
+		if (stats.isDirectory()) return await isGitDirectory(git);
 		if (!stats.isFile()) return false;
 		const content = (await readFile(git, "utf8")).trim();
 		if (!content.startsWith(GITDIR_PREFIX)) return false;
-		return await exists(join(resolve(dir, content.slice(GITDIR_PREFIX.length).trim()), "HEAD"));
+		return await isGitDirectory(resolve(dir, content.slice(GITDIR_PREFIX.length).trim()));
 	} catch {
 		return false;
 	}
 }
 
-async function exists(path: string): Promise<boolean> {
-	return stat(path).then(
+/**
+ * Whether `dir` is a git directory, by the checks git makes itself (`is_git_directory`): its `HEAD`
+ * names a ref or an object, and its common directory (the one its `commondir` file names, as in a
+ * linked worktree, else itself) has `objects` and `refs` directories git can search.
+ */
+async function isGitDirectory(dir: string): Promise<boolean> {
+	if (!(await isValidHead(join(dir, "HEAD")))) return false;
+	const common = await readFile(join(dir, "commondir"), "utf8").then(
+		(path) => resolve(dir, path.trim()),
+		() => dir,
+	);
+	return (await isSearchable(join(common, "objects"))) && (await isSearchable(join(common, "refs")));
+}
+
+/**
+ * git's `validate_headref`: `HEAD` is a symbolic link into `refs/` (its target need not exist yet,
+ * as on an unborn branch), or a file holding `ref: refs/…` or an object id.
+ */
+async function isValidHead(path: string): Promise<boolean> {
+	try {
+		if ((await lstat(path)).isSymbolicLink() && (await readlink(path)).startsWith("refs/")) return true;
+		const content = await readFile(path, "utf8");
+		return /^ref:\s*refs\//.test(content) || /^[0-9a-f]{40}/i.test(content);
+	} catch {
+		return false;
+	}
+}
+
+async function isSearchable(dir: string): Promise<boolean> {
+	return access(dir, constants.X_OK).then(
 		() => true,
 		() => false,
 	);

@@ -47,6 +47,44 @@ function otherScope(scope: Scope): Scope {
 	return scope === "repo" ? "global" : "repo";
 }
 
+/** The modal's own keys, checked before the search key: Pi's keybindings for closing and navigating a list. */
+const LIST_KEYBINDINGS = ["tui.select.cancel", "tui.select.confirm", "tui.select.up", "tui.select.down"] as const;
+
+/** A list keybinding that has the search key too. */
+export interface SearchKeyConflict {
+	keybinding: (typeof LIST_KEYBINDINGS)[number];
+	/** Pi's description of the keybinding, such as "Move selection up". */
+	description: string;
+}
+
+/**
+ * The list keybinding that also has `searchKey` in the effective Pi keybindings, if any. Key ids
+ * are compared in one spelling (any case, modifiers in any order, Pi's `esc` and `return`
+ * aliases); keys a terminal happens to send identically (such as Ctrl+M and Enter without the
+ * Kitty protocol) are not detected.
+ */
+export function searchKeyConflict(searchKey: KeyId, keybindings: KeybindingsManager): SearchKeyConflict | undefined {
+	const key = canonicalKey(searchKey);
+	const keybinding = LIST_KEYBINDINGS.find((name) => keybindings.getKeys(name).some((bound) => canonicalKey(bound) === key));
+	return keybinding && { keybinding, description: keybindings.getDefinition(keybinding).description ?? keybinding };
+}
+
+const MODIFIER_ORDER = ["ctrl", "shift", "alt", "super"];
+const KEY_ALIASES: Record<string, string> = { esc: "escape", return: "enter" };
+
+/** A key id in one spelling: lower case, modifiers in a fixed order, aliases resolved. */
+function canonicalKey(keyId: string): string {
+	let key = keyId.toLowerCase();
+	const modifiers = new Set<string>();
+	for (;;) {
+		const modifier = MODIFIER_ORDER.find((name) => key.startsWith(`${name}+`) && key.length > name.length + 1);
+		if (!modifier) break;
+		modifiers.add(modifier);
+		key = key.slice(modifier.length + 1);
+	}
+	return [...MODIFIER_ORDER.filter((name) => modifiers.has(name)), KEY_ALIASES[key] ?? key].join("+");
+}
+
 /** Pause after a query edit before matching, so a burst of keys starts one matcher run. */
 const SEARCH_DEBOUNCE_MS = 50;
 const MIN_LIST_ROWS = 3;
@@ -62,8 +100,8 @@ const RESERVED_ROWS = 12;
  */
 export class HistoryModal implements Component, Focusable {
 	private readonly options: HistoryModalOptions;
-	/** Aborted when the modal closes; then it ignores keys and results. */
-	private readonly closed = new AbortController();
+	/** Set when the modal closes; then it ignores keys. */
+	private closed = false;
 	/** The query line: Pi's own single-line text input. */
 	private readonly query = new Input({ prompt: "> " });
 	/** Every open starts in repo scope. */
@@ -81,9 +119,15 @@ export class HistoryModal implements Component, Focusable {
 	private selected = 0;
 	/** Index of the lowest list row on screen, so the selection can scroll into view. */
 	private scrollOffset = 0;
+	/**
+	 * The modal key the search key is also bound to, if any. That key keeps its list action, so
+	 * the modal can always be closed and navigated, and the scope cannot be switched.
+	 */
+	readonly searchKeyConflict: SearchKeyConflict | undefined;
 
 	constructor(options: HistoryModalOptions) {
 		this.options = options;
+		this.searchKeyConflict = searchKeyConflict(options.searchKey, options.keybindings);
 		const query = startingQuery(options.draft);
 		// Seeded as a bracketed paste: Input has no API to place the cursor, and a paste leaves it
 		// at the end, ready for refining.
@@ -94,7 +138,7 @@ export class HistoryModal implements Component, Focusable {
 	handleInput(data: string): void {
 		// Keys from the input batch that closed the modal still arrive here; they belong to the
 		// closed modal, so they neither edit the query nor start a search.
-		if (this.closed.signal.aborted) return;
+		if (this.closed) return;
 		const { keybindings } = this.options;
 		if (keybindings.matches(data, "tui.select.cancel")) {
 			this.close({ kind: "dismiss" });
@@ -108,8 +152,8 @@ export class HistoryModal implements Component, Focusable {
 		} else if (keybindings.matches(data, "tui.select.down")) {
 			this.moveSelection(-1);
 		} else if (matchesKey(data, this.options.searchKey)) {
-			// Checked after the list keys, so a search key configured onto one of them cannot stop the
-			// modal from closing, but ahead of the query line's editing keys.
+			// After the list keys, which keep a key they share with it (see searchKeyConflict), and
+			// ahead of the query line's editing keys.
 			this.scope = otherScope(this.scope);
 			this.loadHistory();
 		} else {
@@ -132,7 +176,7 @@ export class HistoryModal implements Component, Focusable {
 	/**
 	 * The frame and title take the scope's colour and the title names the scope, so the scope is
 	 * plain even where the two colours are hard to tell apart. The bottom edge names the scope the
-	 * search key switches to.
+	 * search key switches to, or, when a list key has it, that the scope cannot be switched.
 	 */
 	render(width: number): string[] {
 		const { theme } = this.options;
@@ -152,15 +196,19 @@ export class HistoryModal implements Component, Focusable {
 
 		const top = edge("╭", theme.fg(colour, theme.bold(`History · ${this.scope}`)), "╮");
 		const rule = border(`├${"─".repeat(Math.max(0, width - 2))}┤`);
-		const bottom = edge("╰", rawKeyHint(this.options.searchKey, `switch to ${otherScope(this.scope)}`), "╯");
+		const conflict = this.searchKeyConflict;
+		const action = conflict
+			? `${conflict.description.toLowerCase()} (scope switch unavailable)`
+			: `switch to ${otherScope(this.scope)}`;
+		const bottom = edge("╰", rawKeyHint(this.options.searchKey, action), "╯");
 		return [top, ...this.renderList().map(row), rule, ...this.query.render(inner).map(row), bottom];
 	}
 
 	invalidate(): void {}
 
-	/** Closing aborts loading and any matcher run; the aborted signal also marks the modal closed. */
+	/** Closing marks the modal closed and aborts loading and any matcher run. */
 	dispose(): void {
-		this.closed.abort();
+		this.closed = true;
 		this.load?.abort();
 		this.cancelSearch();
 	}

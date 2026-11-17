@@ -7,8 +7,9 @@
  * agent directory too (`writeConfig()`), so the user's real configuration never applies. The fake mirrors Pi's overlay lifecycle: the overlay is
  * mounted and focused asynchronously, and closing it gives focus back to the editor before the
  * result promise settles. Git repositories are synthetic too (`makeGitRepo()`, `makeGitWorktree()`,
- * `makeGitSubmodule()`), and the harness refuses to run in a temporary directory inside a git
- * repository, where every test directory would share one repo scope.
+ * `makeGitSubmodule()`), laid out as git leaves them, or made by the real `git init` (`gitInit()`);
+ * the harness refuses to run in a temporary directory inside a git repository, where every test
+ * directory would share one repo scope.
  *
  * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
  * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalQuery()`,
@@ -28,6 +29,7 @@
  * that need the stub's answers are skipped there, and a test that opens the modal with a draft may
  * start whatever fzf is on PATH, without depending on its outcome.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative as relativePath, sep } from "node:path";
@@ -339,8 +341,15 @@ export class Harness {
 	/** Make `relative` (below the harness root) the top-level directory of a git repository. */
 	makeGitRepo(relative: string): string {
 		const dir = this.path(relative);
-		mkdirSync(join(dir, ".git"), { recursive: true });
-		writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+		makeGitDirectory(join(dir, ".git"), "ref: refs/heads/main\n");
+		return dir;
+	}
+
+	/** Make `relative` a git repository with the real `git init`, ignoring any `GIT_*` variables inherited (as in a Git hook). */
+	gitInit(relative: string): string {
+		const dir = this.path(relative);
+		const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
+		execFileSync("git", ["init", "--quiet", dir], { env, stdio: "ignore" });
 		return dir;
 	}
 
@@ -367,8 +376,7 @@ export class Harness {
 	makeGitSubmodule(relative: string, repo: string): string {
 		const dir = this.path(relative);
 		const gitDir = join(repo, ".git", "modules", basename(dir));
-		mkdirSync(gitDir, { recursive: true });
-		writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+		makeGitDirectory(gitDir, "ref: refs/heads/main\n");
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(join(dir, ".git"), `gitdir: ${relativePath(dir, gitDir).split(sep).join("/")}\n`);
 		return dir;
@@ -586,14 +594,23 @@ function coloursOf(line: string): { char: string; fg: string }[] {
 	return characters;
 }
 
+/** A synthetic git directory as git recognises one: `HEAD` naming a ref, and `objects` and `refs` directories. */
+function makeGitDirectory(gitDir: string, head: string): void {
+	mkdirSync(join(gitDir, "objects"), { recursive: true });
+	mkdirSync(join(gitDir, "refs"), { recursive: true });
+	writeFileSync(join(gitDir, "HEAD"), head);
+}
+
 /**
- * Fail fast when the temporary directory is inside a git repository (a `.git` directory holding
- * `HEAD`, or a `.git` file): every test directory would then share its repo scope.
+ * Fail fast when the temporary directory is inside a git repository (roughly: a `.git` directory
+ * holding `HEAD`, `objects` and `refs`, or a `.git` file): every test directory would then share
+ * its repo scope.
  */
 function assertOutsideGitRepository(dir: string): void {
 	for (let current = dir; ; current = dirname(current)) {
 		const git = join(current, ".git");
-		if (existsSync(join(git, "HEAD")) || (existsSync(git) && statSync(git).isFile())) {
+		const gitDirectory = ["HEAD", "objects", "refs"].every((name) => existsSync(join(git, name)));
+		if (gitDirectory || (existsSync(git) && statSync(git).isFile())) {
 			throw new Error(`the test root ${dir} is inside the git repository at ${current}; set TMPDIR to a directory outside any repository`);
 		}
 		if (dirname(current) === current) return;
