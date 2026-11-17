@@ -8,7 +8,7 @@ Targets Pi **1.5.2** on Linux and macOS. It is a Pi package written in TypeScrip
 
 ## Status
 
-The bootstrap ([#2](https://github.com/ningw42/pi-history/issues/2)), fuzzy search ([#3](https://github.com/ningw42/pi-history/issues/3)), configuration with skim ([#4](https://github.com/ningw42/pi-history/issues/4)), the repo and global scopes ([#5](https://github.com/ningw42/pi-history/issues/5)), the complete, cached history source ([#6](https://github.com/ningw42/pi-history/issues/6)), skill invocation restoration ([#7](https://github.com/ningw42/pi-history/issues/7)), the preview pane with list rendering ([#8](https://github.com/ningw42/pi-history/issues/8)) and the Up entry ([#9](https://github.com/ningw42/pi-history/issues/9)) of the design in [#1](https://github.com/ningw42/pi-history/issues/1) are done. What works today:
+The bootstrap ([#2](https://github.com/ningw42/pi-history/issues/2)), fuzzy search ([#3](https://github.com/ningw42/pi-history/issues/3)), configuration with skim ([#4](https://github.com/ningw42/pi-history/issues/4)), the repo and global scopes ([#5](https://github.com/ningw42/pi-history/issues/5)), the complete, cached history source ([#6](https://github.com/ningw42/pi-history/issues/6)), skill invocation restoration ([#7](https://github.com/ningw42/pi-history/issues/7)), the preview pane with list rendering ([#8](https://github.com/ningw42/pi-history/issues/8)), the Up entry ([#9](https://github.com/ningw42/pi-history/issues/9)) and the real-Pi smoke suite ([#10](https://github.com/ningw42/pi-history/issues/10)) of the design in [#1](https://github.com/ningw42/pi-history/issues/1) are done. What works today:
 
 - **Up**, with Pi's standard editor or a [compatible custom editor](#editor-compatibility), opens the history modal at Pi's native recall position: on an empty input bar, or with the cursor at the very start of the draft. As in Pi, Up elsewhere on the draft's first row first takes the cursor to its start, and the next Up opens the modal; on any other row (of a multi-line draft, or of a long first line that wraps) Up moves the cursor up, and while the autocomplete popup is open Up does what it does there (by default, moves through its list). If you have bound a key to Pi's `tui.editor.historyPrevious` action, that key opens the modal from anywhere in the draft. **Down** outside the modal is plain cursor movement.
 - **Ctrl+R** (or the [configured](#configuration) search key) in the input bar, at any cursor position, opens the same modal.
@@ -35,14 +35,6 @@ Pi's standard editor and `CustomEditor` subclasses expose public `getCursor()` a
 For editors with both methods, **history entry wins collisions outside autocomplete**: Up at the start of the draft and the previous-history key open the modal even if another editor action shares the key. For example, Up also bound to Tab completion opens history rather than starting completion; `historyPrevious` bound to Ctrl+W opens history rather than deleting a word. An open autocomplete popup keeps its own navigation, cancellation and completion keys. The configured search key retains its separate, highest priority while the input bar has focus.
 
 For every composed editor, **Pi-fed in-bar history is disabled**: prompts Pi submits or loads are dropped at `addToHistory`, so they cannot be recalled into the input bar. This does not clear history a custom editor privately preloaded or maintains independently; such independent in-bar history is outside the supported integration.
-
-## Roadmap
-
-The remaining sub-issue of #1:
-
-| Issue | Adds |
-|---|---|
-| [#10](https://github.com/ningw42/pi-history/issues/10) | A smoke suite that drives the real Pi executable in a pseudo-terminal. |
 
 ## Install
 
@@ -169,21 +161,36 @@ Development and CI require **Node 26.x** (`.node-version`), npm, **`git`**, and 
 
 ```sh
 npm ci --ignore-scripts
-npm run check       # typecheck and all tests; also used by CI and the Git hook
-npm run typecheck   # tsc, no emit
+npm run check       # typecheck and the non-PTY tests; also used by CI and the Git hook
+npm run typecheck   # tsc, no emit (includes the PTY suite)
 npm test            # node:test, using Node's built-in TypeScript support
+npm run test:pty    # real Pi 1.5.2 smoke suite; Linux/macOS, requires tmux, fzf and sk
 ```
 
-`npm run check`, `npm run typecheck`, `npm test` and `npm run release:check` reject runtimes other than stable Node 26.x, with instructions to enter `nix develop` or select Node 26. The guard runs inside the commands, not through pre/post lifecycle hooks, so `--ignore-scripts` does not bypass it.
+`npm run check`, `npm run typecheck`, `npm test`, `npm run test:pty` and `npm run release:check` reject runtimes other than stable Node 26.x, with instructions to enter `nix develop` or select Node 26. The guard runs inside the commands, not through pre/post lifecycle hooks, so `--ignore-scripts` does not bypass it.
 
 This is a **development policy**, not a restriction on Pi's runtime. The extension still loads inside whichever runtime runs Pi, including Bun; there is no Node 26 check in extension code. The existing `engines.node >=22.19` compatibility declaration is unchanged. CI tests Node 26 only; Bun and older Node runtimes are not verified by this suite.
 
 Installation scripts are deliberately disabled: this source-only extension needs no build, and its development dependencies work without lifecycle scripts. No `devEngines`, `engine-strict`, `preinstall` or `prepare` gate imposes Node 26 on Pi's Git-package installation; dependency installation itself is intentionally not subject to the development guard.
 
+### Real-Pi pseudo-terminal smoke suite
+
+After `npm ci --ignore-scripts`, run **`npm run test:pty`** on Linux or macOS with **Node 26**, **tmux**, **fzf** and **sk** on `PATH`. `nix develop` provides those tools; otherwise install tmux through your package manager (for example `apt install tmux` or `brew install tmux`) and the matchers described under [Install](#install). No Python, native npm build, credentials or globally installed Pi is needed.
+
+The suite runs the actual CLI shipped by the pinned `@earendil-works/pi-coding-agent` development dependency and requires its reported version to be **1.5.2**. Missing Pi, tmux or either matcher is a failure, never a skip. All five scenarios run once with each real matcher: Up/Enter recall without submission; Ctrl+R draft search, scope toggle and Escape with the cursor intact; `/model` opened immediately after startup, kept open and used to select a model; another extension's editor retaining its appearance and key; and a stored skill invocation recalled as its command.
+
+Each scenario owns a private tmux server and socket, a fresh home, agent directory, session storage and working directory under `/tmp`. tmux supplies the real controlling PTY **and** terminal emulation: assertions read the current screen and hardware cursor, not an ANSI-stripped transcript or private editor/overlay fields. Screen waits are bounded and show the final screen on failure. The server and fixture directory are removed after the scenario, including on assertion failures; your existing tmux sessions are not used.
+
+The Pi child gets an allowlisted environment with no inherited credentials or `NODE_OPTIONS`, empty `auth.json`, disabled resource discovery, no tools/MCP, `--offline`, disabled telemetry/version checks and Node's network permission withheld. Filesystem writes are restricted to its fixture directory. Node's permission model is a safety net, not a sandbox for hostile native code or child executables; the suite runs only the pinned Pi and your trusted installed tools. A test-only extension intercepts and records any accidental prompt submission before model dispatch, which fails the test. Its keyless static model catalog makes `/model` usable without credentials; either model-dispatch method also fails the test. Nothing queries a model.
+
+The skill fixture is generated by Pi itself: its public `AgentSession.steer()` expands a synthetic skill into the queue without starting an agent run, `clearQueue()` retrieves it, and `SessionManager` writes it to a synthetic session. The real CLI then searches and recalls that stored envelope. No handwritten expansion or private Pi method is used.
+
+This separate command keeps the cross-platform extension-boundary suite usable on Windows and the Git hook lightweight. CI runs both `npm run check` and `npm run test:pty` on Linux/macOS; Windows runs only the former. To run every suite locally, use `npm run check && npm run test:pty`.
+
 ### Optional Nix shell and pre-commit hooks
 
 ```sh
-nix develop          # Node 26, fzf, sk, Git, pre-commit, actionlint and nixfmt
+nix develop          # Node 26, fzf, sk, tmux, Git, pre-commit, actionlint and nixfmt
 npm ci --ignore-scripts
 pre-commit run --all-files
 pre-commit install   # optional: enable checks on each commit
@@ -207,7 +214,7 @@ nix flake update     # explicitly refresh Nix inputs; review and commit flake.lo
 
 ### CI and releases
 
-Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux, macOS and Windows**, each with **Node 26**, read from `.node-version` (also used by the release job), with fzf installed through apt, Homebrew or Chocolatey, and with sk 5.9.0 from its checksum-verified upstream release. The runners are `ubuntu-latest`, `macos-latest` and `windows-latest`, using their default architectures; Windows uses amd64/x64. Nix and workflow lint checks remain local only. Actions use explicit release tags (such as `v7.0.1`, not a floating major); Dependabot proposes monthly action updates. Tags are easier to read but can be moved upstream, unlike commit pins. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
+Every PR and push to `main` runs `.github/workflows/ci.yml`: typechecking and tests on **Linux, macOS and Windows**, each with **Node 26**, read from `.node-version` (also used by the release job), with fzf installed through apt, Homebrew or Chocolatey, and with sk 5.9.0 from its checksum-verified upstream release. The runners are `ubuntu-latest`, `macos-latest` and `windows-latest`, using their default architectures; Windows uses amd64/x64. Linux and macOS also install tmux and run the real-Pi PTY smoke suite. Nix and workflow lint checks remain local only. Actions use explicit release tags (such as `v7.0.1`, not a floating major); Dependabot proposes monthly action updates. Tags are easier to read but can be moved upstream, unlike commit pins. To make these checks mandatory before merging, enable a GitHub branch ruleset for `main` and require the CI jobs (workflow files alone do not enforce merge policy).
 
 Distribution remains Git-only: `package.json` is `private` to prevent accidental npm publication. Pi reads the existing `pi.extensions` entry point from the checkout and supplies the host packages declared as peers. There is no bundling, npm token, uploaded tarball or compiled release asset. GitHub provides its usual source archives.
 
@@ -239,4 +246,4 @@ The harness (`test/harness.ts`) always puts a scripted stub matcher (`test/fixtu
 
 The entry points are tested in `test/up-entry.test.ts` (Ctrl+R in `test/ctrl-r-modal.test.ts`). The fake wires the editor as Pi does: it gives it an autocomplete provider (Pi's own `CombinedAutocompleteProvider`, completing the files below the current directory), so Tab opens a real completion popup (and tests rebind its cancel and completing keys to Up), and it hands the editor every prompt submitted and, at each session start, the live session's prompts, as Pi does for its in-bar history, so a test that no key recalls a prompt into the input bar would fail if one did. Other extensions can be loaded ahead of this one: one installs a `CustomEditor` subclass with a key and a rendered line of its own, another an adapter around Pi's own editor that offers only Pi's editor contract, either public cursor/popup method, or both. The missing-capability cases cover empty and nonempty Up/previous-history input without a modal or Pi-fed recall, real popup navigation and completion, and configured-search-key confirmation and dismissal (including cursor preservation). Representative collisions outside autocomplete verify history entry over Tab completion and word deletion, without mirroring Pi's internal precedence table. Pi's working status is embedded the way Pi embeds it, in an editor that declares it embeds one. Keys can be sent to the input bar under an open modal, as when Pi focuses it there. The fake records each editor factory installed other than synchronously inside a `session_start` handler, which is when Pi would dismiss a selector opened in the meantime. To hold history loading open while keys are pressed, the current directory is made a git repository whose `HEAD` is a named pipe: resolving the repo scope reads it, and blocks until the test writes it; then it becomes a regular file. Named pipes need POSIX, so those two tests are skipped on Windows.
 
-On Windows the stub uses `.cmd` launchers, which Node will not start without a shell, and the extension never uses one: tests that need the stub to answer are skipped there, and tests that open the modal with a draft may start the fzf CI installs, without depending on its outcome. The POSIX read-permission tests (an unreadable session file, and the cache serving or retrying one) are skipped on Windows (and for root), as are the tests for an fzf without execute permission and for a query too long to start fzf with; malformed-session coverage runs everywhere. CI exercises the extension-boundary suite, not the real Pi terminal executable, so the Windows job is not an interactive Windows smoke test.
+On Windows the stub uses `.cmd` launchers, which Node will not start without a shell, and the extension never uses one: tests that need the stub to answer are skipped there, and tests that open the modal with a draft may start the fzf CI installs, without depending on its outcome. The POSIX read-permission tests (an unreadable session file, and the cache serving or retrying one) are skipped on Windows (and for root), as are the tests for an fzf without execute permission and for a query too long to start fzf with; malformed-session coverage runs everywhere. The Windows job exercises the extension-boundary suite, not the real Pi terminal executable; only Linux/macOS run the real-Pi smoke suite.
