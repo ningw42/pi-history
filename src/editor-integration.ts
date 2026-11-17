@@ -1,6 +1,6 @@
 import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type EditorComponent, type KeyId, matchesKey } from "@earendil-works/pi-tui";
-import { HistoryModal, type ModalResult, type SearchKeyConflict } from "./history-modal.ts";
+import { HistoryModal, type ModalResult, OVERLAY_MAX_HEIGHT_PERCENT, type SearchKeyConflict } from "./history-modal.ts";
 import type { HistorySource, SessionContext } from "./history-source.ts";
 import type { Matcher } from "./matcher.ts";
 
@@ -76,7 +76,7 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 						options.reportSearchKeyConflict(conflictProblem(searchKey, session.modal.searchKeyConflict));
 						return session.modal;
 					},
-					{ overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "80%" } },
+					{ overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: `${OVERLAY_MAX_HEIGHT_PERCENT}%` } },
 				)
 				.then((result) => {
 					// Dismissal leaves the input bar untouched. Confirmation replaces the whole draft;
