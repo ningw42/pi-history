@@ -93,10 +93,11 @@ describe("repo scope", () => {
 	});
 
 	test("never covers a session recorded with a relative working directory, or none", async (t) => {
-		const h = useHarness(t);
+		// Registered first, so it runs before the harness is removed: Windows cannot remove the current directory.
 		const previous = process.cwd();
-		process.chdir(h.cwd); // where a relative directory would resolve to the current one
 		t.after(() => process.chdir(previous));
+		const h = useHarness(t);
+		process.chdir(h.cwd); // where a relative directory would resolve to the current one
 		promptIn(h, "work/project", "in the current directory", 1);
 		h.writeSession({ cwd: ".", prompts: [{ text: "recorded as .", timestamp: minutesAfterT0(2) }] });
 		writeFileSync(
