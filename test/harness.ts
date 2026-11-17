@@ -635,17 +635,19 @@ export class Harness {
 			throw new Error(`expected a list, a preview and a query line in the rendered modal:\n${lines.join("\n")}`);
 		}
 		const inner = (line: string) => line.replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd();
-		// A label too wide for its edge is truncated with "…", without its trailing space.
+		// Keep list/query indicators, but remove the empty gutter from unmarked content.
+		const plain = (line: string) => inner(line).slice(2);
 		const label = (line: string | undefined, left: string, right: string) =>
-			new RegExp(`^${left}─ (.*?) ?─*${right}$`, "u").exec(line ?? "")?.[1];
+			new RegExp(`^${left}─+ (.*?) ─*${right}$`, "u").exec(line ?? "")?.[1];
 		const bottomLabel = label(lines.at(-1), "╰", "╯");
+		const list = lines.slice(1, previewRule);
 		return {
-			list: lines.slice(1, previewRule).map(inner),
+			list: list.map(list.some((line) => line.startsWith("│ › ")) ? inner : plain),
 			lastUsed: label(lines[previewRule], "├", "┤"),
-			preview: lines.slice(previewRule + 1, queryRule).map(inner),
+			preview: lines.slice(previewRule + 1, queryRule).map(plain),
 			// Pi's Input is one line.
 			query: inner(lines[queryRule + 1] ?? ""),
-			hints: [...lines.slice(queryRule + 2, -1).map(inner), ...(bottomLabel === undefined ? [] : [bottomLabel])],
+			hints: [...lines.slice(queryRule + 2, -1).map(plain), ...(bottomLabel === undefined ? [] : [bottomLabel])],
 		};
 	}
 
