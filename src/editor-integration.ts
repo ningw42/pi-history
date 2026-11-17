@@ -1,5 +1,5 @@
 import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type EditorComponent, type KeyId, matchesKey } from "@earendil-works/pi-tui";
+import { type Editor, type EditorComponent, getKeybindings, type KeyId, matchesKey } from "@earendil-works/pi-tui";
 import { HistoryModal, type ModalResult, OVERLAY_MAX_HEIGHT_PERCENT, type SearchKeyConflict } from "./history-modal.ts";
 import type { HistorySource, SessionContext } from "./history-source.ts";
 import type { Matcher } from "./matcher.ts";
@@ -27,6 +27,8 @@ export interface EditorIntegrationOptions {
 	 * Tells the user, once, that the search key cannot switch scope because a list key has it;
 	 * called with undefined when no list key has it. Checked on every open, from the input the search
 	 * key sent and the keybindings in effect then (Pi reloads them after `session_start` on `/reload`).
+	 * When the Up entry opens the modal, only a keybinding that has the search key itself is seen, so
+	 * it is called only when there is one.
 	 */
 	reportSearchKeyConflict: (problem: string | undefined) => void;
 }
@@ -45,7 +47,7 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 			previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
 
 		/**
-		 * Set from the moment the search key opens a modal until its result has been applied. Pi
+		 * Set from the moment an entry point opens a modal until its result has been applied. Pi
 		 * mounts the overlay asynchronously and gives focus back to the editor before the result
 		 * arrives, so keys from the same input batch can reach the editor in both windows. They
 		 * belong to the modal instead (a closed modal cannot close again); otherwise a buffered Enter
@@ -53,8 +55,8 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 		 */
 		let pending: { modal?: HistoryModal } | undefined;
 
-		/** Open the modal for the search key, which arrived as `searchKeyInput`. */
-		const openModal = ({ historySource, matcher, searchKey }: ConfiguredParts, searchKeyInput: string) => {
+		/** Open the modal: for the search key, which arrived as `searchKeyInput`, or for the Up entry (undefined). */
+		const openModal = ({ historySource, matcher, searchKey }: ConfiguredParts, searchKeyInput: string | undefined) => {
 			const session: { modal?: HistoryModal } = {};
 			pending = session;
 			// The draft as the user wrote it: a collapsed paste counts with its content.
@@ -73,7 +75,9 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 							searchKeyInput,
 							done,
 						});
-						options.reportSearchKeyConflict(conflictProblem(searchKey, session.modal.searchKeyConflict));
+						// Without the search key's input, a conflict the terminal causes cannot be ruled out.
+						const conflict = session.modal.searchKeyConflict;
+						if (searchKeyInput !== undefined || conflict) options.reportSearchKeyConflict(conflictProblem(searchKey, conflict));
 						return session.modal;
 					},
 					{ overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: `${OVERLAY_MAX_HEIGHT_PERCENT}%` } },
@@ -101,10 +105,35 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 				openModal(configured, data);
 				return;
 			}
+			// The Up entry. Pi's own recall starts nowhere else, so its in-bar history is unreachable.
+			if (startsHistoryRecall(editor, data)) {
+				openModal(configured, undefined);
+				return;
+			}
 			handleInput(data);
 		};
 		return editor;
 	});
+}
+
+/** The keys an open autocomplete popup takes for navigating its list, ahead of the editor's own bindings. */
+const AUTOCOMPLETE_KEYBINDINGS = ["tui.select.up", "tui.select.down", "tui.select.pageUp", "tui.select.pageDown"] as const;
+
+/**
+ * Whether `data` is where Pi's editor would start recalling its in-bar history: the key bound to
+ * Pi's previous-history action (unbound by default), anywhere; or the key bound to moving the
+ * cursor up, pressed at the very start of the draft (Pi recalls from the first visual row only when
+ * the draft is empty or the cursor is in its first column, which is the same place). An open
+ * autocomplete popup keeps the keys it navigates with. Decided from the editor's public state and
+ * Pi's keybindings, as Pi's editor decides it.
+ */
+function startsHistoryRecall(editor: EditorComponent & Partial<Pick<Editor, "getCursor" | "isShowingAutocomplete">>, data: string): boolean {
+	const keybindings = getKeybindings();
+	if (editor.isShowingAutocomplete?.() && AUTOCOMPLETE_KEYBINDINGS.some((name) => keybindings.matches(data, name))) return false;
+	if (keybindings.matches(data, "tui.editor.historyPrevious")) return true;
+	if (!keybindings.matches(data, "tui.editor.cursorUp")) return false;
+	const cursor = editor.getCursor?.();
+	return cursor ? cursor.line === 0 && cursor.col === 0 : editor.getText() === "";
 }
 
 /** What to tell the user about a list key that has the search key too; undefined when none has. */

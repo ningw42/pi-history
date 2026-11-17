@@ -2,7 +2,14 @@
  * Extension-boundary test harness.
  *
  * Loads the real extension entry point against a fake Pi API and UI context, with Pi's real
- * editor component. History comes from synthetic session files in a temporary agent directory
+ * editor component, wired as Pi wires it: given an autocomplete provider (completing the files
+ * below the current directory), and handed every prompt Pi submits and, at each session
+ * start, the live session's prompts for its in-bar history. Other extensions can be loaded ahead of
+ * this one (`extensionsBefore`), for example to install an editor of their own first, and Pi's
+ * working status can be shown as while the agent works (`showWorkingStatus()`). History loading can
+ * be held open until a test releases it (`holdHistoryLoading()`).
+ *
+ * History comes from synthetic session files in a temporary agent directory
  * (`writeSession()`, or `writeSessionEntries()` for branches, compactions and content blocks) and
  * from a fake live session that Pi's session manager holds in memory (`liveEntries`,
  * `livePrompt()`); no real prompt history is ever read. The extension's configuration file is read from that
@@ -13,7 +20,9 @@
  * the harness refuses to run in a temporary directory inside a git repository, where every test
  * directory would share one repo scope.
  *
- * Tests drive keys and assert on what a user sees: the input bar's text and cursor, and the
+ * Tests drive keys, to whatever has focus (`press()`) or to the input bar under an open overlay
+ * (`pressInInputBar()`), and assert on what a user sees: the input bar's text and cursor, its rendered
+ * lines with any autocomplete popup (`editorLines()`), and the
  * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalLastUsed()`,
  * `modalPreview()`, `modalQuery()`, `modalHint()`, `modalHints()`; empty or undefined when no overlay is shown), the
  * colours of the modal's frame and title (`modalColours()`) and of each list row
@@ -22,8 +31,8 @@
  * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
  * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
  * boundaries, for behaviour that has no visible output: prompts handed to Pi for submission
- * (`submissions`), what the extension registered or installed (`registrations`,
- * `editorFactoryInstalls`, `overlayRequests`, `notifications`), the session files on disk, and what
+ * (`submissions`), what the extension registered or installed and when (`registrations`,
+ * `editorFactoryInstalls`, `lateEditorFactoryInstalls`, `overlayRequests`, `notifications`), the session files on disk, and what
  * the matcher process was given and whether it was killed (`matcherCalls()`). Never assert on the
  * extension's private state.
  *
@@ -33,8 +42,22 @@
  * that need the stub's answers are skipped there, and a test that opens the modal with a draft may
  * start whatever fzf is on PATH, without depending on its outcome.
  */
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	constants,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative as relativePath, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +69,7 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+	CombinedAutocompleteProvider,
 	CURSOR_MARKER,
 	type Component,
 	type EditorComponent,
@@ -76,6 +100,11 @@ export const Keys = {
 	ctrlMKitty: "\x1b[109;5u",
 	/** Ctrl+U, Pi's delete-to-line-start: clears a line whose cursor is at its end. */
 	clearLine: "\x15",
+	/** Ctrl+A, Pi's cursor-to-line-start. */
+	lineStart: "\x01",
+	tab: "\t",
+	altP: "\x1bp",
+	altN: "\x1bn",
 } as const;
 
 /** Wait long enough for a debounced matcher run to have started, were one going to. */
@@ -179,6 +208,8 @@ export interface HarnessOptions {
 	terminalRows?: number;
 	/** Scripted responses for the stub that is always put on PATH as both `fzf` and `sk`. */
 	stubMatcher?: { responses?: StubMatcherResponse[] };
+	/** Other extensions Pi loads ahead of pi-history at every session start, in this order. */
+	extensionsBefore?: ((pi: ExtensionAPI) => void)[];
 }
 
 export interface StubMatcherCall {
@@ -214,8 +245,19 @@ export class Harness {
 	/** The file Pi keeps the running session in (it may not exist yet); undefined in an ephemeral session. */
 	readonly liveSessionFile: string | undefined;
 	editorFactoryInstalls = 0;
+	/**
+	 * Editor factories installed other than synchronously inside a `session_start` handler: after
+	 * asynchronous work, when Pi would dismiss a selector the user opened in the meantime.
+	 */
+	lateEditorFactoryInstalls = 0;
+	/** The working status Pi shows outside the input bar, when the editor does not embed it (see `showWorkingStatus()`). */
+	workingStatusOutsideEditor: string | undefined;
 
 	private readonly options: HarnessOptions;
+	/** Set while a `session_start` handler runs synchronously. */
+	private inSessionStart = false;
+	/** Unblock whatever waits on a pipe that `holdHistoryLoading()` set up and the test did not release. */
+	private readonly heldLoads: (() => void)[] = [];
 	private readonly handlers = new Map<string, ((event: unknown, ctx: ExtensionContext) => unknown)[]>();
 	private readonly keybindings: KeybindingsManager;
 	private readonly theme: Theme;
@@ -336,9 +378,22 @@ export class Harness {
 		this.editorFactory = undefined;
 		this.handlers.clear();
 		if (liveEntries) this.liveEntries.splice(0, this.liveEntries.length, ...liveEntries);
+		for (const extension of this.options.extensionsBefore ?? []) extension(this.fakePi());
 		piHistory(this.fakePi());
 		for (const handler of this.handlers.get("session_start") ?? []) {
-			await handler({ type: "session_start", reason }, this.fakeContext());
+			let asyncRest: unknown; // what the handler leaves to do after its synchronous part
+			this.inSessionStart = true;
+			try {
+				asyncRest = handler({ type: "session_start", reason }, this.fakeContext());
+			} finally {
+				this.inSessionStart = false;
+			}
+			await asyncRest;
+		}
+		// Pi renders the session's messages and hands its prompts to the editor's in-bar history.
+		for (const entry of this.liveEntries) {
+			const message = entry.message as { role?: string; content?: unknown } | undefined;
+			if (message?.role === "user" && typeof message.content === "string") this.editorComponent?.addToHistory?.(message.content);
 		}
 	}
 
@@ -362,8 +417,22 @@ export class Harness {
 		for (const key of keys) (this.overlay?.component ?? this.editor).handleInput?.(key);
 	}
 
+	/**
+	 * Send raw key sequences to the input bar even while an overlay is shown: as when Pi focuses the
+	 * input bar under an open overlay, which it does when a dialog it shows in the input bar's place
+	 * closes (for example another extension's confirmation, while the agent works).
+	 */
+	pressInInputBar(...keys: string[]): void {
+		for (const key of keys) this.editor.handleInput(key);
+	}
+
 	editorText(): string {
 		return this.editor.getText();
+	}
+
+	/** The input bar as rendered, ANSI-stripped and right-trimmed: its borders, its text and any autocomplete popup below. */
+	editorLines(width = 80): string[] {
+		return this.editor.render(width).map((line) => stripAnsi(line).replace(CURSOR_MARKER, "").trimEnd());
 	}
 
 	editorCursor(): { line: number; col: number } {
@@ -484,6 +553,54 @@ export class Harness {
 		return dir;
 	}
 
+	/**
+	 * Show Pi's working status, as while the agent works. Like Pi, the harness embeds it in the input
+	 * bar's top border when the editor embeds a working status, and otherwise shows it outside the
+	 * input bar (`workingStatusOutsideEditor`).
+	 */
+	showWorkingStatus(text: string): void {
+		const indicator = { renderInBorder: () => text, renderSpinnerInBorder: () => text.slice(0, 1) };
+		const editor = this.editor as EditorComponent & { embedWorkingStatus?: boolean; setWorkingStatusIndicator?(indicator: unknown): void };
+		const embedded = editor.embedWorkingStatus === true && typeof editor.setWorkingStatusIndicator === "function";
+		if (embedded) editor.setWorkingStatusIndicator?.(indicator);
+		this.workingStatusOutsideEditor = embedded ? undefined : text;
+	}
+
+	/**
+	 * Hold history loading open until `release()`: makes the current directory a git repository
+	 * whose `HEAD` is a named pipe, which the history source must read to resolve the repo scope, so
+	 * a load waits there until the pipe is written. Then `HEAD` becomes a regular file, so later loads
+	 * do not wait. POSIX only.
+	 */
+	holdHistoryLoading(): { release(): Promise<void> } {
+		const gitDir = join(this.cwd, ".git");
+		mkdirSync(join(gitDir, "objects"), { recursive: true });
+		mkdirSync(join(gitDir, "refs"), { recursive: true });
+		const head = join(gitDir, "HEAD");
+		const content = "ref: refs/heads/main\n";
+		execFileSync("mkfifo", [head]);
+		let released = false;
+		this.heldLoads.push(() => {
+			if (released) return;
+			// A load waiting to read the pipe gets an end of file at once (an invalid HEAD).
+			try {
+				closeSync(openSync(head, constants.O_WRONLY | constants.O_NONBLOCK));
+			} catch {
+				// No load is waiting.
+			}
+		});
+		return {
+			release: async () => {
+				released = true;
+				const writer = await open(head, "w"); // once a load has opened the pipe to read it
+				rmSync(head);
+				writeFileSync(head, content);
+				await writer.writeFile(content);
+				await writer.close();
+			},
+		};
+	}
+
 	/** Give the terminal `rows` rows, as a resize does; the next render reads them. (Tests choose the width at each render.) */
 	resize(rows: number): void {
 		this.tui.terminal.rows = rows;
@@ -573,6 +690,7 @@ export class Harness {
 
 	dispose(): void {
 		this.overlay?.component.dispose?.();
+		for (const unblock of this.heldLoads) unblock();
 		for (const [key, value] of this.savedEnv) {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
@@ -638,6 +756,7 @@ export class Harness {
 			getEditorComponent: () => this.editorFactory,
 			setEditorComponent: (factory: ((...args: never[]) => EditorComponent) | undefined) => {
 				this.editorFactoryInstalls++;
+				if (!this.inSessionStart) this.lateEditorFactoryInstalls++;
 				this.editorFactory = factory;
 				const text = this.editorComponent?.getText() ?? "";
 				// Mirrors Pi's setCustomEditorComponent wiring.
@@ -649,8 +768,14 @@ export class Harness {
 						)
 					: undefined;
 				if (editor) {
-					editor.onSubmit = (submitted: string) => this.submissions.push(submitted);
+					editor.onSubmit = (submitted: string) => {
+						this.submissions.push(submitted);
+						// As Pi does with every prompt it submits, for its in-bar history.
+						editor.addToHistory?.(submitted);
+					};
 					editor.setText(text);
+					// Completing file paths below the current directory, as Pi's provider does.
+					editor.setAutocompleteProvider?.(new CombinedAutocompleteProvider([], cwd, null));
 					this.editorComponent = editor;
 				}
 			},
@@ -784,6 +909,16 @@ function fakeTheme(): Theme {
 }
 
 type TestContext = { after(fn: () => void): void };
+
+/** The history modal is shown. */
+export function assertModalShown(h: Harness): void {
+	assert.match(h.modalTitle() ?? "", /History/);
+}
+
+/** No overlay is shown. */
+export function assertNoModal(h: Harness): void {
+	assert.deepEqual(h.overlayLines(), []);
+}
 
 /** Create a harness and dispose it after the test. */
 export function useHarness(t: TestContext, options?: HarnessOptions): Harness {
