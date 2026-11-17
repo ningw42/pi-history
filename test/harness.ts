@@ -26,7 +26,7 @@
  * rendered overlay lines (`overlayLines()`, `modalTitle()`, `modalList()`, `modalLastUsed()`,
  * `modalPreview()`, `modalQuery()`, `modalHint()`, `modalHints()`; empty or undefined when no overlay is shown), the
  * colours of the modal's frame and title (`modalColours()`) and of each list row
- * (`modalListColours()`), and whether the modal places the terminal cursor (`modalShowsCursor()`).
+ * (`modalListColours()`), and whether and where the modal places the terminal cursor (`modalShowsCursor()`, `modalCursor()`).
  * The terminal can be resized (`resize()`), and times are shown in UTC unless a test sets `TZ`. Like Pi,
  * the harness tells a focusable overlay when it gains or loses focus (`setOverlayFocus()` moves Pi's
  * focus away and back). The one allowed exception is a narrow set of checks at the extension's external
@@ -79,6 +79,7 @@ import {
 	KeybindingsManager,
 	setKeybindings,
 	TUI_KEYBINDINGS,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import piHistory from "../src/index.ts";
 
@@ -476,6 +477,16 @@ export class Harness {
 	/** Whether the rendered modal places the terminal cursor (Pi's cursor marker), as on a focused text input. */
 	modalShowsCursor(width = 80): boolean {
 		return this.overlay?.component.render(width).some((line) => line.includes(CURSOR_MARKER)) ?? false;
+	}
+
+	/** The terminal cursor's rendered row and column in the modal, or undefined when it places none. */
+	modalCursor(width = 80): { line: number; col: number } | undefined {
+		const lines = this.overlay?.component.render(width) ?? [];
+		for (const [line, text] of lines.entries()) {
+			const marker = text.indexOf(CURSOR_MARKER);
+			if (marker >= 0) return { line, col: visibleWidth(text.slice(0, marker)) };
+		}
+		return undefined;
 	}
 
 	/** The modal's top frame line (its title), ANSI-stripped; undefined when no modal is shown. */

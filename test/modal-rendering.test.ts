@@ -107,6 +107,62 @@ describe("the modal's layout", () => {
 	});
 });
 
+describe("the query on exceptionally narrow terminals", () => {
+	for (const [width, contentColumn, empty, atStart] of [
+		[5, 2, "│   │", "│ a │"],
+		[6, 2, "│    │", "│ ab │"],
+		[7, 3, "│ >   │", "│ >a  │"],
+		[8, 3, "│ >    │", "│ >ab  │"],
+	] as const) {
+		test(`keeps its gutter, cursor and native editing across resizes at ${width} columns`, async (t) => {
+			const h = harnessWithPrompts(t, ["a"], { terminalRows: 200 });
+			await h.start();
+			await pressSearchKey(h);
+
+			const assertQuery = (text: string, col: number) => {
+				const lines = h.overlayLines(width);
+				const line = lines.findLastIndex((row) => row.startsWith("├")) + 1;
+				assert.equal(lines[line], text);
+				assert.deepEqual(h.modalCursor(width), { line, col });
+				assert.ok(lines.every((row) => visibleWidth(row) === width), lines.join("\n"));
+			};
+			for (const key of [Keys.lineStart, Keys.lineEnd]) {
+				h.press(key);
+				assertQuery(empty, contentColumn);
+			}
+			const lines = h.overlayLines(width);
+			const previewLine = lines.findIndex((line) => line.startsWith("├")) + 1;
+			assert.equal(lines[1]?.indexOf("a"), contentColumn);
+			assert.equal(lines[previewLine]?.indexOf("a"), contentColumn);
+
+			h.type("abc");
+			// Native Input scrolls to the end cursor alone in a one- or two-column window.
+			assertQuery(empty, contentColumn);
+			assert.equal(h.modalQuery(24), "> abc");
+			assert.equal(h.modalCursor(24)?.col, 7);
+			h.press(Keys.lineStart);
+			assertQuery(atStart, contentColumn);
+			assert.equal(h.modalQuery(24), "> abc");
+			assert.equal(h.modalCursor(24)?.col, 4);
+			h.press(Keys.lineEnd);
+			assertQuery(empty, contentColumn);
+			h.press(Keys.lineStart);
+
+			// Editing after a narrow render still uses the original native cursor and kill ring.
+			assertQuery(atStart, contentColumn);
+			h.type("X");
+			assert.equal(h.modalQuery(24), "> Xabc");
+			assert.equal(h.modalCursor(24)?.col, 5);
+			h.press(Keys.lineEnd, Keys.clearLine);
+			assertQuery(empty, contentColumn);
+			h.modalQuery(24);
+			h.press("\x19"); // Ctrl+Y: yank what Ctrl+U deleted, even after another resize.
+			assert.equal(h.modalQuery(24), "> Xabc");
+			assert.equal(h.modalCursor(24)?.col, 8);
+		});
+	}
+});
+
 describe("list rows", () => {
 	test("are each drawn in one colour: matches are not highlighted", needsStub, async (t) => {
 		const h = useHarness(t, {

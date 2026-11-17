@@ -127,8 +127,8 @@ export class HistoryModal implements Component, Focusable {
 	private readonly options: HistoryModalOptions;
 	/** Set when the modal closes; then it ignores keys. */
 	private closed = false;
-	/** The query line: Pi's own single-line text input. */
-	private readonly query = new Input({ prompt: "> " });
+	/** Pi's single-line input; render the prompt separately so it follows the shrinking gutter. */
+	private readonly query = new Input({ prompt: "" });
 	/** Every open starts in repo scope. */
 	private scope: Scope = "repo";
 	/** Cancels loading the current scope's records; a scope switch supersedes it. */
@@ -244,7 +244,7 @@ export class HistoryModal implements Component, Focusable {
 			previewRule,
 			...this.renderPreview(selected, contentWidth, previewRows).map(plainRow),
 			rule,
-			...this.query.render(markedWidth).map(row),
+			...this.query.render(contentWidth).map((content) => row("> ".slice(0, gutter.length) + content)),
 			...hints.slice(0, -1).map(plainRow),
 			edge("╰", hints.at(-1) ?? "", "╯"),
 		];
