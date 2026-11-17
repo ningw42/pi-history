@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { Harness, Keys, minutesAfterT0, useHarness } from "./harness.ts";
+import { Harness, Keys, minutesAfterT0, needsPosixPermissions, useHarness } from "./harness.ts";
 
 /** The rendered overlay shows the history modal. */
 function assertModalShown(h: Harness): void {
@@ -236,11 +236,7 @@ describe("history records", () => {
 		assert.deepEqual(h.modalList(), ["› valid prompt"]);
 	});
 
-	test("still load when a neighbouring session file is unreadable", {
-		skip: process.platform === "win32" || process.getuid?.() === 0
-			? "POSIX read-permission test requires a non-root Unix user"
-			: false,
-	}, async (t) => {
+	test("still load when a neighbouring session file is unreadable", needsPosixPermissions, async (t) => {
 		const h = useHarness(t);
 		h.writeSession({ cwd: h.cwd, prompts: [{ text: "valid prompt", timestamp: minutesAfterT0(1) }] });
 		const unreadable = h.writeSession({ cwd: h.cwd, prompts: [{ text: "unreadable", timestamp: minutesAfterT0(4) }] });

@@ -8,6 +8,7 @@ import {
 	type Harness,
 	Keys,
 	minutesAfterT0,
+	needsPosixPermissions,
 	needsStub,
 	type SessionEntry,
 	useHarness,
@@ -40,17 +41,13 @@ const BRANCHED_AND_COMPACTED_LIST = [
 	"› after the compaction",
 ];
 
-/** Open the modal on an empty draft and wait for its records. */
+/** Press the search key and wait for the records: on an empty draft it opens the modal, inside it switches scope. */
 async function open(h: Harness): Promise<void> {
 	h.press(Keys.ctrlR);
 	await h.loaded();
 }
 
-/** Switch the open modal to the other scope and wait for its records. */
-async function switchScope(h: Harness): Promise<void> {
-	h.press(Keys.ctrlR);
-	await h.loaded();
-}
+const switchScope = open;
 
 describe("the live session", () => {
 	for (const noSession of [false, true]) {
@@ -81,6 +78,48 @@ describe("the live session", () => {
 
 		assert.deepEqual(h.modalList(), ["  still only in memory", "› written to disk"]);
 	});
+
+	test("a prompt another Pi process appends to its session file appears", async (t) => {
+		const h = useHarness(t);
+		h.livePrompt("typed here", minutesAfterT0(1));
+		const file = h.writeSessionEntries({ cwd: h.cwd, entries: h.liveEntries, path: h.liveSessionFile });
+		await h.start();
+
+		// As a second Pi process continuing the same session (`pi -c` in another terminal) does.
+		appendFileSync(file, `${JSON.stringify(userEntry("elsewhere", null, "typed in another Pi process", minutesAfterT0(2)))}\n`);
+		await open(h);
+
+		assert.deepEqual(h.modalList(), ["  typed here", "› typed in another Pi process"]);
+	});
+
+	test("an ephemeral session's prompts stay history after /new, and after /fork leaves their branch", async (t) => {
+		const h = useHarness(t, { noSession: true });
+		await h.start();
+		h.livePrompt("in the first session", minutesAfterT0(1));
+		await h.start("new", { liveEntries: [] }); // Pi starts a fresh in-memory session
+		h.livePrompt("kept by the fork", minutesAfterT0(2));
+		h.livePrompt("left behind by the fork", minutesAfterT0(3));
+		// Forking an in-memory session rewrites it to the path up to the fork point.
+		await h.start("fork", { liveEntries: h.liveEntries.slice(0, 2) });
+
+		await open(h);
+		assert.deepEqual(h.modalList(), ["  in the first session", "  kept by the fork", "› left behind by the fork"]);
+		await switchScope(h);
+		assert.deepEqual(h.modalList(), ["  in the first session", "  kept by the fork", "› left behind by the fork"]);
+	});
+
+	test("a persisted session's prompts go with its file, even those it held in memory", async (t) => {
+		const h = useHarness(t);
+		h.livePrompt("in a deleted session", minutesAfterT0(1));
+		const file = h.writeSessionEntries({ cwd: h.cwd, entries: h.liveEntries, path: h.liveSessionFile });
+		await h.start();
+		await h.start("new", { liveEntries: [] });
+
+		rmSync(file);
+		await open(h);
+
+		assert.deepEqual(h.modalList(), ["No history yet"]);
+	});
 });
 
 describe("every user message counts", () => {
@@ -102,6 +141,20 @@ describe("every user message counts", () => {
 		await open(h);
 
 		assert.deepEqual(h.modalList(), BRANCHED_AND_COMPACTED_LIST);
+	});
+});
+
+describe("a session file", () => {
+	test("with a malformed line, or a last line without a line break, still yields its other prompts", async (t) => {
+		const h = useHarness(t);
+		const file = h.writeSessionEntries({ cwd: h.cwd, entries: [userEntry("u1", null, "before the damage", minutesAfterT0(1))] });
+		const last = userEntry("u2", "u1", "on the last line", minutesAfterT0(2));
+		appendFileSync(file, `{"type":"message","message":{"role":"user","content":"cut off\n${JSON.stringify(last)}`);
+		await h.start();
+
+		await open(h);
+
+		assert.deepEqual(h.modalList(), ["  before the damage", "› on the last line"]);
 	});
 });
 
@@ -130,11 +183,6 @@ describe("a user message's content", () => {
 		assert.equal(h.editorText(), "line one\nline two");
 	});
 });
-
-/** Skip a test that makes a file unreadable: POSIX permissions do not stop root, nor apply on Windows. */
-const needsPosixPermissions = {
-	skip: process.platform === "win32" || process.getuid?.() === 0 ? "POSIX read-permission test requires a non-root Unix user" : false,
-};
 
 describe("the history cache", () => {
 	test("serves an unchanged session file without reading it again, also after /new and /reload", needsPosixPermissions, async (t) => {

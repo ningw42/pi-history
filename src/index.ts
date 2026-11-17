@@ -1,7 +1,7 @@
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
 import { type ConfiguredParts, installEditorIntegration } from "./editor-integration.ts";
-import { createHistorySource, sessionContextOf } from "./history-source.ts";
+import { createHistorySource, rememberEndingSession, sessionContextOf } from "./history-source.ts";
 import { createMatcher } from "./matcher.ts";
 
 /**
@@ -27,6 +27,10 @@ export default function piHistory(pi: ExtensionAPI): void {
 			searchKey: config.searchKey,
 		};
 		reportOnce(ctx, "configProblem", problem);
+	});
+	// Before Pi replaces the session (or quits), while it is still intact.
+	pi.on("session_shutdown", (_event, ctx) => {
+		if (ctx.mode === "tui") rememberEndingSession(sessionContextOf(ctx, pi.getSettings().sessionDir));
 	});
 }
 

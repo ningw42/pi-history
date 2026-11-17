@@ -42,8 +42,8 @@ export interface LiveSession {
 	cwd: string;
 	/** Every entry of the session, in the order Pi appended them. */
 	entries: readonly unknown[];
-	/** The file Pi keeps the session in, if it is persisted; it holds nothing the entries do not. */
-	file: string | undefined;
+	/** Whether the session is ephemeral (`--no-session`): saved to no file. */
+	ephemeral: boolean;
 }
 
 /**
@@ -81,9 +81,23 @@ export function sessionContextOf(
 		live: {
 			cwd: sessionManager.getHeader()?.cwd ?? sessionManager.getCwd(),
 			entries: sessionManager.getEntries(),
-			file: sessionManager.getSessionFile(),
+			ephemeral: sessionManager.getSessionFile() === undefined,
 		},
 	};
+}
+
+/**
+ * Keep the prompts of the live session as it ends (on `/new`, `/resume`, `/fork`, `/reload` or
+ * quitting) for the life of the Pi process if it is ephemeral (`--no-session`): they are on no
+ * disk, and Pi's `/new` and `/fork` replace them in memory. They are kept with the session storage
+ * the session would have been saved in, standing in for its file, and later loads of that storage
+ * include them in both scopes, as they did while the session ran. A persisted session's prompts
+ * are left to its file, which stays the authority, so deleting the file still removes them.
+ */
+export function rememberEndingSession({ storage, live }: SessionContext): void {
+	if (!live.ephemeral) return;
+	const { endedEphemeralPrompts } = storageState(storage);
+	for (const record of userPrompts(live.entries, live.cwd)) keepNewest(endedEphemeralPrompts, record);
 }
 
 /** Resolve a user-configured path the way Pi does: `~` expands to home, relative to `cwd`. */
@@ -104,31 +118,32 @@ export interface HistorySourceOptions {
 }
 
 /**
- * History drawn from the live session, in every scope, and from the Pi session files in a scope.
- * The live session is read from Pi's memory, so its file is skipped. Every other session file in
- * Pi's storage is found by listing its directories, and the working directory recorded in each
+ * History drawn, in every scope, from the live session in Pi's memory and the ephemeral sessions
+ * that ended in this process (see `rememberEndingSession`), and from the Pi session files in a
+ * scope. Every session file in Pi's storage, the live session's included (another Pi process may
+ * append to it), is found by listing its directories, and the working directory recorded in each
  * file's header decides whether the session is in scope; only in-scope files are read further.
- * What is read from a file is cached until it changes (see `SessionFileCache`). Session files are
- * only ever read.
+ * What is read from a file is cached until it changes (see `refreshSessionFileCache`). Session
+ * files are only ever read.
  */
 export function createHistorySource({ recordLimit }: HistorySourceOptions): HistorySource {
 	return {
 		async load(scope, context, signal) {
 			const inScope = scope === "global" ? async () => true : await inRepoScopeOf(context.cwd);
-			const { live } = context;
-			const occurrences = userPrompts(live.entries, live.cwd);
-			for (const [path, file] of await currentSessionFiles(context.storage, live.file)) {
+			const { live, storage } = context;
+			const occurrences = [userPrompts(live.entries, live.cwd), [...storageState(storage).endedEphemeralPrompts.values()]];
+			for (const [path, cached] of await refreshSessionFileCache(storage)) {
 				signal?.throwIfAborted();
 				try {
-					if (file.cwd === undefined) file.cwd = await recordedCwd(path);
-					if (file.cwd === null || !(await inScope(file.cwd))) continue;
-					file.prompts ??= await readUserPrompts(path, file.cwd);
-					occurrences.push(...file.prompts);
+					if (cached.cwd === undefined) cached.cwd = await recordedCwd(path);
+					if (cached.cwd === null || !(await inScope(cached.cwd))) continue;
+					cached.prompts ??= await readUserPrompts(path, cached.cwd);
+					occurrences.push(cached.prompts);
 				} catch {
 					// Unreadable for now: skipped, and read again at the next load.
 				}
 			}
-			return dedupeNewestFirst(occurrences).slice(0, recordLimit);
+			return dedupeNewestFirst(occurrences.flat()).slice(0, recordLimit);
 		},
 	};
 }
@@ -143,45 +158,49 @@ interface CachedSessionFile {
 	prompts?: HistoryRecord[];
 }
 
-/** Cached session files by path, for each session storage. */
-type SessionFileCache = Map<string, Map<string, CachedSessionFile>>;
-
-/**
- * The cache of what has been read from session files, kept for the life of the Pi process. Pi
- * re-imports the extension's module at every session start (`/new`, `/resume`, `/fork`, `/reload`),
- * so it lives in process-wide state, under a key versioned with the shape of its entries, so an
- * extension updated by `/reload` never reads entries an older one left behind.
- */
-function sessionFileCache(): SessionFileCache {
-	const processState = globalThis as typeof globalThis & Record<symbol, SessionFileCache | undefined>;
-	const key = Symbol.for("pi-history.sessionFileCache.v1");
-	processState[key] ??= new Map();
-	return processState[key];
+/** What the history source keeps about one session storage for the life of the Pi process. */
+interface StorageState {
+	/** What has been read from the storage's session files, by path. */
+	files: Map<string, CachedSessionFile>;
+	/** The prompts of the ephemeral sessions that ended in this process, by text, at their most recent use. */
+	endedEphemeralPrompts: Map<string, HistoryRecord>;
 }
 
 /**
- * The session files in `storage` now, other than the live session's, each with what is cached for
- * it: an unchanged file keeps its cached entry, a new or changed one starts empty, and the entries
- * of files no longer there are dropped from the cache.
+ * The history source's state for `storage`, kept in process-wide state: Pi re-imports the
+ * extension's module at every session start (`/new`, `/resume`, `/fork`, `/reload`), so it lives on
+ * `globalThis`, under a key versioned with its shape, so an extension updated by `/reload` never
+ * reads state an older one left behind.
  */
-async function currentSessionFiles(
-	storage: SessionStorage,
-	liveFile: string | undefined,
-): Promise<Map<string, CachedSessionFile>> {
-	const live = liveFile && resolve(liveFile);
-	const paths = (await sessionFiles(storage)).filter((path) => resolve(path) !== live);
+function storageState(storage: SessionStorage): StorageState {
+	const global = globalThis as typeof globalThis & Record<symbol, Map<string, StorageState> | undefined>;
+	const states = (global[Symbol.for("pi-history.storageStates.v1")] ??= new Map());
+	const key = JSON.stringify(storage);
+	let state = states.get(key);
+	if (!state) {
+		state = { files: new Map(), endedEphemeralPrompts: new Map() };
+		states.set(key, state);
+	}
+	return state;
+}
+
+/**
+ * Bring the cache of `storage` up to date with the session files there now, and return its
+ * entries: an unchanged file keeps its cached entry, a new or changed one starts empty, and the
+ * entries of files no longer there are dropped.
+ */
+async function refreshSessionFileCache(storage: SessionStorage): Promise<Map<string, CachedSessionFile>> {
+	const paths = await sessionFiles(storage);
 	const versions = await Promise.all(paths.map(versionOf));
-	const cache = sessionFileCache();
-	const storageKey = storage.layout === "custom" ? `custom:${resolve(storage.dir)}` : `default:${resolve(storage.root)}`;
-	const cached = cache.get(storageKey);
+	const state = storageState(storage);
 	const current = new Map<string, CachedSessionFile>();
 	paths.forEach((path, i) => {
 		const version = versions[i];
 		if (version === undefined) return;
-		const file = cached?.get(path);
-		current.set(path, file?.version === version ? file : { version });
+		const cached = state.files.get(path);
+		current.set(path, cached?.version === version ? cached : { version });
 	});
-	cache.set(storageKey, current);
+	state.files = current;
 	return current;
 }
 
@@ -342,8 +361,9 @@ async function isSearchable(dir: string): Promise<boolean> {
 }
 
 /**
- * Marks a line that may hold a user message (`"role":"user"`). Inside a JSON string, such as tool
- * output, the quotes are escaped, so the mark does not occur there.
+ * Marks a line that may hold a user message (`"role":"user"`). Inside a JSON string, such as a
+ * tool's text output, the quotes are escaped, so the mark does not occur there; a line whose JSON
+ * objects hold it as a key or value, such as a tool call's arguments, is parsed and yields nothing.
  */
 const USER_MARK = Buffer.from('"user"');
 const NEWLINE = 0x0a;
@@ -403,11 +423,14 @@ function userMessageText(content: unknown): string | undefined {
 /** Keep the most recent use of each distinct text, newest first. */
 function dedupeNewestFirst(occurrences: HistoryRecord[]): HistoryRecord[] {
 	const newest = new Map<string, HistoryRecord>();
-	for (const record of occurrences) {
-		const existing = newest.get(record.text);
-		if (!existing || record.timestamp > existing.timestamp) newest.set(record.text, record);
-	}
+	for (const record of occurrences) keepNewest(newest, record);
 	return [...newest.values()].sort((a, b) => b.timestamp - a.timestamp);
+}
+
+/** Record a use of a text in `newest`, unless it already holds a more recent one. */
+function keepNewest(newest: Map<string, HistoryRecord>, record: HistoryRecord): void {
+	const existing = newest.get(record.text);
+	if (!existing || record.timestamp > existing.timestamp) newest.set(record.text, record);
 }
 
 /** The value `text` holds as JSON, or undefined when it is not JSON. */
