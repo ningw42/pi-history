@@ -1,5 +1,5 @@
 import { constants, type Dirent } from "node:fs";
-import { access, type FileHandle, lstat, open, readdir, readFile, readlink, stat } from "node:fs/promises";
+import { access, lstat, open, readdir, readFile, readlink, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -29,6 +29,21 @@ export interface SessionContext {
 	cwd: string;
 	/** Where Pi keeps its session files. */
 	storage: SessionStorage;
+	/** The running session, as Pi holds it in memory. */
+	live: LiveSession;
+}
+
+/**
+ * The running session as Pi holds it in memory: every entry, on every branch, including prompts
+ * submitted moments ago and those of an ephemeral (`--no-session`) session, which never reach disk.
+ */
+export interface LiveSession {
+	/** The working directory the session records. */
+	cwd: string;
+	/** Every entry of the session, in the order Pi appended them. */
+	entries: readonly unknown[];
+	/** The file Pi keeps the session in, if it is persisted; it holds nothing the entries do not. */
+	file: string | undefined;
 }
 
 /**
@@ -45,19 +60,30 @@ export type SessionStorage = { layout: "default"; root: string } | { layout: "cu
  * not the configured one means Pi's default layout; any other is custom (as with a
  * `--session-dir` flag, which extensions cannot see). An ephemeral (`--no-session`) session reports
  * none, so the configured directory applies, else the default layout.
+ *
+ * The live session is the session manager's in-memory state at the time of the call.
  */
 export function sessionContextOf(
 	ctx: Pick<ExtensionContext, "cwd" | "sessionManager">,
 	settingsSessionDir: string | undefined,
 ): SessionContext {
+	const { sessionManager } = ctx;
 	const root = join(getAgentDir(), "sessions");
-	const current = ctx.sessionManager.getSessionDir();
+	const current = sessionManager.getSessionDir();
 	const configured = process.env[SESSION_DIR_ENV] || settingsSessionDir;
 	const configuredDir = configured ? resolveUserPath(configured, ctx.cwd) : undefined;
 	let custom: string | undefined;
 	if (!current) custom = configuredDir;
 	else if (resolve(current) === configuredDir || resolve(dirname(current)) !== resolve(root)) custom = current;
-	return { cwd: ctx.cwd, storage: custom ? { layout: "custom", dir: custom } : { layout: "default", root } };
+	return {
+		cwd: ctx.cwd,
+		storage: custom ? { layout: "custom", dir: custom } : { layout: "default", root },
+		live: {
+			cwd: sessionManager.getHeader()?.cwd ?? sessionManager.getCwd(),
+			entries: sessionManager.getEntries(),
+			file: sessionManager.getSessionFile(),
+		},
+	};
 }
 
 /** Resolve a user-configured path the way Pi does: `~` expands to home, relative to `cwd`. */
@@ -78,24 +104,95 @@ export interface HistorySourceOptions {
 }
 
 /**
- * History drawn from the Pi session files in a scope. Every session file in Pi's storage is found by
- * listing its directories, and the working directory recorded in each file's header decides whether
- * the session is in scope; only in-scope files are read further. Session files are only ever read.
+ * History drawn from the live session, in every scope, and from the Pi session files in a scope.
+ * The live session is read from Pi's memory, so its file is skipped. Every other session file in
+ * Pi's storage is found by listing its directories, and the working directory recorded in each
+ * file's header decides whether the session is in scope; only in-scope files are read further.
+ * What is read from a file is cached until it changes (see `SessionFileCache`). Session files are
+ * only ever read.
  */
 export function createHistorySource({ recordLimit }: HistorySourceOptions): HistorySource {
 	return {
 		async load(scope, context, signal) {
 			const inScope = scope === "global" ? async () => true : await inRepoScopeOf(context.cwd);
-			const occurrences: HistoryRecord[] = [];
-			for (const path of await sessionFiles(context.storage)) {
+			const { live } = context;
+			const occurrences = userPrompts(live.entries, live.cwd);
+			for (const [path, file] of await currentSessionFiles(context.storage, live.file)) {
 				signal?.throwIfAborted();
-				const cwd = await recordedCwd(path);
-				if (cwd === undefined || !(await inScope(cwd))) continue;
-				occurrences.push(...(await readUserPrompts(path, cwd)));
+				try {
+					if (file.cwd === undefined) file.cwd = await recordedCwd(path);
+					if (file.cwd === null || !(await inScope(file.cwd))) continue;
+					file.prompts ??= await readUserPrompts(path, file.cwd);
+					occurrences.push(...file.prompts);
+				} catch {
+					// Unreadable for now: skipped, and read again at the next load.
+				}
 			}
 			return dedupeNewestFirst(occurrences).slice(0, recordLimit);
 		},
 	};
+}
+
+/** What has been read from one session file, kept while the file is unchanged. */
+interface CachedSessionFile {
+	/** The file's identity and version when it was listed: device, inode, size and modification time. */
+	version: string;
+	/** The working directory its header records ("" for none), or null when it is not a session. Undefined until read. */
+	cwd?: string | null;
+	/** Its user prompts in file order. Undefined until read, which happens once the session is first in scope. */
+	prompts?: HistoryRecord[];
+}
+
+/** Cached session files by path, for each session storage. */
+type SessionFileCache = Map<string, Map<string, CachedSessionFile>>;
+
+/**
+ * The cache of what has been read from session files, kept for the life of the Pi process. Pi
+ * re-imports the extension's module at every session start (`/new`, `/resume`, `/fork`, `/reload`),
+ * so it lives in process-wide state, under a key versioned with the shape of its entries, so an
+ * extension updated by `/reload` never reads entries an older one left behind.
+ */
+function sessionFileCache(): SessionFileCache {
+	const processState = globalThis as typeof globalThis & Record<symbol, SessionFileCache | undefined>;
+	const key = Symbol.for("pi-history.sessionFileCache.v1");
+	processState[key] ??= new Map();
+	return processState[key];
+}
+
+/**
+ * The session files in `storage` now, other than the live session's, each with what is cached for
+ * it: an unchanged file keeps its cached entry, a new or changed one starts empty, and the entries
+ * of files no longer there are dropped from the cache.
+ */
+async function currentSessionFiles(
+	storage: SessionStorage,
+	liveFile: string | undefined,
+): Promise<Map<string, CachedSessionFile>> {
+	const live = liveFile && resolve(liveFile);
+	const paths = (await sessionFiles(storage)).filter((path) => resolve(path) !== live);
+	const versions = await Promise.all(paths.map(versionOf));
+	const cache = sessionFileCache();
+	const storageKey = storage.layout === "custom" ? `custom:${resolve(storage.dir)}` : `default:${resolve(storage.root)}`;
+	const cached = cache.get(storageKey);
+	const current = new Map<string, CachedSessionFile>();
+	paths.forEach((path, i) => {
+		const version = versions[i];
+		if (version === undefined) return;
+		const file = cached?.get(path);
+		current.set(path, file?.version === version ? file : { version });
+	});
+	cache.set(storageKey, current);
+	return current;
+}
+
+/** A file's identity and version, or undefined when it is not a regular file (or no longer there). */
+async function versionOf(path: string): Promise<string | undefined> {
+	try {
+		const stats = await stat(path);
+		return stats.isFile() ? `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}` : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** Every session file in Pi's storage. A directory that cannot be listed holds none. */
@@ -128,13 +225,12 @@ const HEADER_CHUNK_BYTES = 4096;
 
 /**
  * The working directory recorded in a session file's header, its first line, read on its own: ""
- * when the header records none, and undefined when the file cannot be read or does not start with
- * a session header (so it is not a session).
+ * when the header records none, and null when the file does not start with a session header (so it
+ * is not a session). Rejects when the file cannot be read.
  */
-async function recordedCwd(path: string): Promise<string | undefined> {
-	let file: FileHandle | undefined;
+async function recordedCwd(path: string): Promise<string | null> {
+	const file = await open(path, "r");
 	try {
-		file = await open(path, "r");
 		const chunks: Buffer[] = [];
 		for (let position = 0; position < MAX_HEADER_BYTES; ) {
 			const { bytesRead, buffer } = await file.read(Buffer.alloc(HEADER_CHUNK_BYTES), 0, HEADER_CHUNK_BYTES, position);
@@ -144,13 +240,11 @@ async function recordedCwd(path: string): Promise<string | undefined> {
 			if (bytesRead === 0 || newline !== -1) break;
 			position += bytesRead;
 		}
-		const header: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-		if (!isObject(header) || header.type !== "session") return undefined;
+		const header = parseJson(Buffer.concat(chunks).toString("utf8"));
+		if (!isObject(header) || header.type !== "session") return null;
 		return typeof header.cwd === "string" ? header.cwd : "";
-	} catch {
-		return undefined;
 	} finally {
-		await file?.close();
+		await file.close();
 	}
 }
 
@@ -247,31 +341,41 @@ async function isSearchable(dir: string): Promise<boolean> {
 	);
 }
 
-/** Every user prompt in one session file, in file order. An unreadable file yields nothing. */
+/**
+ * Marks a line that may hold a user message (`"role":"user"`). Inside a JSON string, such as tool
+ * output, the quotes are escaped, so the mark does not occur there.
+ */
+const USER_MARK = Buffer.from('"user"');
+const NEWLINE = 0x0a;
+
+/**
+ * Every user prompt in one session file, in file order; a malformed line holds none. Rejects when
+ * the file cannot be read. Only the lines holding `USER_MARK` are decoded and parsed: tool output
+ * lines can be megabytes and never hold a prompt. The bytes are scanned rather than decoding and
+ * splitting the whole file, which keeps the work done on Pi's main thread small.
+ */
 async function readUserPrompts(path: string, cwd: string): Promise<HistoryRecord[]> {
-	let content: string;
-	try {
-		content = await readFile(path, "utf8");
-	} catch {
-		return [];
+	const content = await readFile(path);
+	const entries: unknown[] = [];
+	for (let at = content.indexOf(USER_MARK); at !== -1; ) {
+		const start = content.lastIndexOf(NEWLINE, at) + 1;
+		const newline = content.indexOf(NEWLINE, at);
+		const end = newline === -1 ? content.length : newline;
+		entries.push(parseJson(content.toString("utf8", start, end)));
+		at = content.indexOf(USER_MARK, end);
 	}
-	const records: HistoryRecord[] = [];
-	for (const line of content.split("\n")) {
-		// Cheap pre-filter: tool output lines can be megabytes and never hold a user prompt.
-		if (!line.includes('"user"')) continue;
-		const record = parseUserPrompt(line, cwd);
-		if (record) records.push(record);
-	}
-	return records;
+	return userPrompts(entries, cwd);
 }
 
-function parseUserPrompt(line: string, cwd: string): HistoryRecord | undefined {
-	let entry: unknown;
-	try {
-		entry = JSON.parse(line);
-	} catch {
-		return undefined;
-	}
+/**
+ * Every user prompt among a session's entries, in order: every user message, on every branch and
+ * before any compaction, since a prompt that was typed is history.
+ */
+function userPrompts(entries: readonly unknown[], cwd: string): HistoryRecord[] {
+	return entries.flatMap((entry) => userPromptOf(entry, cwd) ?? []);
+}
+
+function userPromptOf(entry: unknown, cwd: string): HistoryRecord | undefined {
 	if (!isObject(entry) || entry.type !== "message" || !isObject(entry.message)) return undefined;
 	const message = entry.message;
 	if (message.role !== "user") return undefined;
@@ -304,6 +408,15 @@ function dedupeNewestFirst(occurrences: HistoryRecord[]): HistoryRecord[] {
 		if (!existing || record.timestamp > existing.timestamp) newest.set(record.text, record);
 	}
 	return [...newest.values()].sort((a, b) => b.timestamp - a.timestamp);
+}
+
+/** The value `text` holds as JSON, or undefined when it is not JSON. */
+function parseJson(text: string): unknown {
+	try {
+		return JSON.parse(text);
+	} catch {
+		return undefined;
+	}
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
