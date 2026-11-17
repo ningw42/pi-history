@@ -18,6 +18,7 @@ export default function piHistory(pi: ExtensionAPI): void {
 		installEditorIntegration(ctx, {
 			configured: () => configured,
 			sessionContext: () => sessionContextOf(ctx, pi.getSettings().sessionDir),
+			reportSearchKeyConflict: (problem) => reportOnce(ctx, "searchKeyConflict", problem),
 		});
 		const { config, problem } = loadConfig(getAgentDir());
 		configured = {
@@ -25,21 +26,20 @@ export default function piHistory(pi: ExtensionAPI): void {
 			matcher: createMatcher({ name: config.matcher, command: config.matcherCommand }),
 			searchKey: config.searchKey,
 		};
-		reportConfigProblem(ctx, problem);
+		reportOnce(ctx, "configProblem", problem);
 	});
 }
 
-/** Process-wide memory of the configuration problem last reported; undefined once there is none. */
-const REPORTED_PROBLEM = Symbol.for("pi-history.reportedConfigProblem");
-
 /**
- * Tell the user about a configuration problem once. Pi loads the extension afresh, re-importing its
+ * Tell the user about a problem on `topic` once. Pi loads the extension afresh, re-importing its
  * module, at every session start (`/new`, `/resume`, `/fork` and `/reload` included), so only
- * process-wide state remembers what was already reported. A problem is reported when it is new or
- * has changed; fixing the file forgets it, so making the same mistake again is reported again.
+ * process-wide state (a `Symbol.for` key per topic on `globalThis`) remembers what was already
+ * reported. A problem is reported when it is new or has changed; once there is none (undefined),
+ * it is forgotten, so making the same mistake again is reported again.
  */
-function reportConfigProblem(ctx: ExtensionContext, problem: string | undefined): void {
-	const processState = globalThis as typeof globalThis & { [REPORTED_PROBLEM]?: string };
-	if (problem && problem !== processState[REPORTED_PROBLEM]) ctx.ui.notify(problem, "warning");
-	processState[REPORTED_PROBLEM] = problem;
+function reportOnce(ctx: ExtensionContext, topic: string, problem: string | undefined): void {
+	const key = Symbol.for(`pi-history.reported.${topic}`);
+	const processState = globalThis as typeof globalThis & Record<symbol, string | undefined>;
+	if (problem && problem !== processState[key]) ctx.ui.notify(problem, "warning");
+	processState[key] = problem;
 }

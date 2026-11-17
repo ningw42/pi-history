@@ -2,9 +2,10 @@
 // Scripted stand-in for fzf/sk used by the extension-boundary tests.
 //
 // STUB_MATCHER_CONFIG: optional path to JSON
-//   { "responses": [{ "query": "...", "output": ["record", ...], "exitCode": 0, "delayMs": 0, "stderr": "...",
-//                     "signal": "SIGKILL" }] }
-//   A response whose query equals the received query (or that has no query) is used; otherwise
+//   { "responses": [{ "query": "...", "input": "record", "output": ["record", ...], "exitCode": 0, "delayMs": 0,
+//                     "stderr": "...", "signal": "SIGKILL" }] }
+//   The first response whose query equals the received query (or that has no query), and whose input
+//   record (if it has one) is among the received records, is used; otherwise
 //   the stub keeps input records containing the query (case-insensitive), in input order, and
 //   exits 1 when nothing matches, like fzf. A response with a signal ends the stub by that signal
 //   after its delay, with no output.
@@ -27,7 +28,9 @@ log({ argv, env, input });
 
 const query = findQuery(argv);
 const config = process.env.STUB_MATCHER_CONFIG ? JSON.parse(readFileSync(process.env.STUB_MATCHER_CONFIG, "utf8")) : {};
-const response = (config.responses ?? []).find((r) => r.query === undefined || r.query === query);
+const response = (config.responses ?? []).find(
+	(r) => (r.query === undefined || r.query === query) && (r.input === undefined || input.includes(r.input)),
+);
 
 if (response?.delayMs) await new Promise((resolve) => setTimeout(resolve, response.delayMs));
 

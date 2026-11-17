@@ -1,6 +1,6 @@
 import { CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type EditorComponent, type KeyId, matchesKey } from "@earendil-works/pi-tui";
-import { HistoryModal, type ModalResult } from "./history-modal.ts";
+import { HistoryModal, type ModalResult, type SearchKeyConflict } from "./history-modal.ts";
 import type { HistorySource, SessionContext } from "./history-source.ts";
 import type { Matcher } from "./matcher.ts";
 
@@ -8,7 +8,7 @@ import type { Matcher } from "./matcher.ts";
 export interface ConfiguredParts {
 	historySource: HistorySource;
 	matcher: Matcher;
-	/** Key that opens the history modal while the input bar has focus. */
+	/** Key that opens the history modal while the input bar has focus, and switches its scope inside it. */
 	searchKey: KeyId;
 }
 
@@ -18,8 +18,14 @@ export interface EditorIntegrationOptions {
 	 * install before any I/O and read the configuration right afterwards, in the same synchronous step.
 	 */
 	configured: () => ConfiguredParts;
-	/** Where the sessions for the current directory live, resolved when the modal opens. */
+	/** The current directory and Pi's session storage, resolved at every load (on opening the modal and on each scope switch). */
 	sessionContext: () => SessionContext;
+	/**
+	 * Tells the user, once, that the search key cannot switch scope because a list key has it;
+	 * called with undefined when no list key has it. Checked on every open, from the input the search
+	 * key sent and the keybindings in effect then (Pi reloads them after `session_start` on `/reload`).
+	 */
+	reportSearchKeyConflict: (problem: string | undefined) => void;
 }
 
 /**
@@ -44,7 +50,8 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 		 */
 		let pending: { modal?: HistoryModal } | undefined;
 
-		const openModal = ({ historySource, matcher }: ConfiguredParts) => {
+		/** Open the modal for the search key, which arrived as `searchKeyInput`. */
+		const openModal = ({ historySource, matcher, searchKey }: ConfiguredParts, searchKeyInput: string) => {
 			const session: { modal?: HistoryModal } = {};
 			pending = session;
 			// The draft as the user wrote it: a collapsed paste counts with its content.
@@ -57,10 +64,13 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 							theme: modalTheme,
 							keybindings: modalKeybindings,
 							draft,
-							loadRecords: (signal) => historySource.load(options.sessionContext(), signal),
+							loadRecords: (scope, signal) => historySource.load(scope, options.sessionContext(), signal),
 							matcher,
+							searchKey,
+							searchKeyInput,
 							done,
 						});
+						options.reportSearchKeyConflict(conflictProblem(searchKey, session.modal.searchKeyConflict));
 						return session.modal;
 					},
 					{ overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "80%" } },
@@ -85,11 +95,23 @@ export function installEditorIntegration(ctx: ExtensionContext, options: EditorI
 			// Checked before the editor sees the key, so the search key wins over Pi's own bindings.
 			const configured = options.configured();
 			if (matchesKey(data, configured.searchKey)) {
-				openModal(configured);
+				openModal(configured, data);
 				return;
 			}
 			handleInput(data);
 		};
 		return editor;
 	});
+}
+
+/** What to tell the user about a list key that has the search key too; undefined when none has. */
+function conflictProblem(searchKey: KeyId, conflict: SearchKeyConflict | undefined): string | undefined {
+	if (!conflict) return undefined;
+	const { keybinding, description } = conflict;
+	return (
+		`pi-history: the search key "${searchKey}" also acts as ${keybinding} (${description}), through your Pi keybindings ` +
+		"or because your terminal sends the same input for both keys. " +
+		"In the history modal it keeps that action, so it cannot switch between repo and global scope. " +
+		`Set another "searchKey" in pi-history.json, or rebind ${keybinding}.`
+	);
 }

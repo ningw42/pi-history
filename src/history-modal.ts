@@ -1,7 +1,16 @@
 import { setTimeout as delay } from "node:timers/promises";
-import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, type Focusable, Input, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { HistoryRecord } from "./history-source.ts";
+import { type KeybindingsManager, rawKeyHint, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import {
+	type Component,
+	type Focusable,
+	Input,
+	type KeyId,
+	matchesKey,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
+import type { HistoryRecord, Scope } from "./history-source.ts";
 import type { MatchOutcome, Matcher } from "./matcher.ts";
 
 /** How the history modal closed. */
@@ -13,10 +22,14 @@ export interface HistoryModalOptions {
 	keybindings: KeybindingsManager;
 	/** The input bar's text when the modal opened; it becomes the starting query. */
 	draft: string;
-	/** Loads the records to browse. The signal aborts when the modal closes. */
-	loadRecords: (signal: AbortSignal) => Promise<HistoryRecord[]>;
+	/** Loads a scope's records to browse. The signal aborts when the load is superseded or the modal closes. */
+	loadRecords: (scope: Scope, signal: AbortSignal) => Promise<HistoryRecord[]>;
 	/** Filters and ranks the records for a non-empty query. */
 	matcher: Matcher;
+	/** The search key, which opened the modal; inside it, it switches between the repo and global scopes. */
+	searchKey: KeyId;
+	/** The input that opened the modal: the search key as this terminal sends it. */
+	searchKeyInput: string;
 	done: (result: ModalResult) => void;
 }
 
@@ -28,6 +41,34 @@ type LoadState = { kind: "loading" } | { kind: "ready"; records: HistoryRecord[]
  * does not flicker, but they cannot be confirmed until the latest query's outcome replaces them.
  */
 type Results = { kind: "searching" } | MatchOutcome<HistoryRecord>;
+
+/** Each scope's frame and title colour: the usual highlighted border for repo, a contrasting one for global. */
+const SCOPE_COLOURS: Record<Scope, ThemeColor> = { repo: "borderAccent", global: "warning" };
+
+function otherScope(scope: Scope): Scope {
+	return scope === "repo" ? "global" : "repo";
+}
+
+/** The modal's own keys, checked before the search key: Pi's keybindings for closing and navigating a list. */
+const LIST_KEYBINDINGS = ["tui.select.cancel", "tui.select.confirm", "tui.select.up", "tui.select.down"] as const;
+
+/** A list keybinding that has the search key too. */
+export interface SearchKeyConflict {
+	keybinding: (typeof LIST_KEYBINDINGS)[number];
+	/** Pi's description of the keybinding, such as "Move selection up". */
+	description: string;
+}
+
+/**
+ * The list keybinding that the search key also acts as, if any: the one the search key's own
+ * input (as this terminal sent it to open the modal) matches in the effective Pi keybindings. So
+ * a shared binding counts, and so does a key the terminal sends identically, such as Ctrl+M
+ * arriving as Enter without the Kitty keyboard protocol; with the protocol they stay distinct.
+ */
+export function searchKeyConflict(searchKeyInput: string, keybindings: KeybindingsManager): SearchKeyConflict | undefined {
+	const keybinding = LIST_KEYBINDINGS.find((name) => keybindings.matches(searchKeyInput, name));
+	return keybinding && { keybinding, description: keybindings.getDefinition(keybinding).description ?? keybinding };
+}
 
 /** Pause after a query edit before matching, so a burst of keys starts one matcher run. */
 const SEARCH_DEBOUNCE_MS = 50;
@@ -44,9 +85,14 @@ const RESERVED_ROWS = 12;
  */
 export class HistoryModal implements Component, Focusable {
 	private readonly options: HistoryModalOptions;
-	private readonly abort = new AbortController();
+	/** Set when the modal closes; then it ignores keys. */
+	private closed = false;
 	/** The query line: Pi's own single-line text input. */
 	private readonly query = new Input({ prompt: "> " });
+	/** Every open starts in repo scope. */
+	private scope: Scope = "repo";
+	/** Cancels loading the current scope's records; a scope switch supersedes it. */
+	private load: AbortController | undefined;
 	private history: LoadState = { kind: "loading" };
 	private results: Results = { kind: "searching" };
 	/**
@@ -58,31 +104,26 @@ export class HistoryModal implements Component, Focusable {
 	private selected = 0;
 	/** Index of the lowest list row on screen, so the selection can scroll into view. */
 	private scrollOffset = 0;
+	/**
+	 * The modal key the search key is also bound to, if any. That key keeps its list action, so
+	 * the modal can always be closed and navigated, and the scope cannot be switched.
+	 */
+	readonly searchKeyConflict: SearchKeyConflict | undefined;
 
 	constructor(options: HistoryModalOptions) {
 		this.options = options;
+		this.searchKeyConflict = searchKeyConflict(options.searchKeyInput, options.keybindings);
 		const query = startingQuery(options.draft);
 		// Seeded as a bracketed paste: Input has no API to place the cursor, and a paste leaves it
 		// at the end, ready for refining.
 		if (query) this.query.handleInput(`\x1b[200~${query}\x1b[201~`);
-		options
-			.loadRecords(this.abort.signal)
-			.then(
-				(records): LoadState => ({ kind: "ready", records }),
-				(error: unknown): LoadState => ({ kind: "error", message: errorMessage(error) }),
-			)
-			.then((history) => {
-				if (this.abort.signal.aborted) return;
-				this.history = history;
-				this.queryChanged(0);
-				this.options.tui.requestRender();
-			});
+		this.loadHistory();
 	}
 
 	handleInput(data: string): void {
 		// Keys from the input batch that closed the modal still arrive here; they belong to the
 		// closed modal, so they neither edit the query nor start a search.
-		if (this.abort.signal.aborted) return;
+		if (this.closed) return;
 		const { keybindings } = this.options;
 		if (keybindings.matches(data, "tui.select.cancel")) {
 			this.close({ kind: "dismiss" });
@@ -95,6 +136,11 @@ export class HistoryModal implements Component, Focusable {
 			this.moveSelection(1);
 		} else if (keybindings.matches(data, "tui.select.down")) {
 			this.moveSelection(-1);
+		} else if (matchesKey(data, this.options.searchKey)) {
+			// After the list keys, which keep a key they share with it (see searchKeyConflict), and
+			// ahead of the query line's editing keys.
+			this.scope = otherScope(this.scope);
+			this.loadHistory();
 		} else {
 			const before = this.query.getValue();
 			this.query.handleInput(data);
@@ -112,28 +158,71 @@ export class HistoryModal implements Component, Focusable {
 		this.query.focused = value;
 	}
 
+	/**
+	 * The frame and title take the scope's colour and the title names the scope, so the scope is
+	 * plain even where the two colours are hard to tell apart. The bottom edge names the scope the
+	 * search key switches to, or, when a list key has it, that the scope cannot be switched.
+	 */
 	render(width: number): string[] {
 		const { theme } = this.options;
 		const inner = Math.max(1, width - 4);
-		const border = (text: string) => theme.fg("borderAccent", text);
+		const colour = SCOPE_COLOURS[this.scope];
+		const border = (text: string) => theme.fg(colour, text);
 		const row = (content: string) => {
 			const fitted = truncateToWidth(content, inner, "…");
 			return `${border("│")} ${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))} ${border("│")}`;
 		};
+		/** A horizontal edge with `label` embedded after its left corner. */
+		const edge = (left: string, label: string, right: string) => {
+			const room = Math.max(0, width - 3);
+			const fitted = truncateToWidth(` ${label} `, room, "…");
+			return border(`${left}─`) + fitted + border(`${"─".repeat(Math.max(0, room - visibleWidth(fitted)))}${right}`);
+		};
 
-		const title = ` ${theme.bold("History")} `;
-		const top = border("╭─") + title + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(title)))}╮`);
+		const top = edge("╭", theme.fg(colour, theme.bold(`History · ${this.scope}`)), "╮");
 		const rule = border(`├${"─".repeat(Math.max(0, width - 2))}┤`);
-		const bottom = border(`╰${"─".repeat(Math.max(0, width - 2))}╯`);
+		const conflict = this.searchKeyConflict;
+		const action = conflict
+			? `${conflict.description.toLowerCase()} (scope switch unavailable)`
+			: `switch to ${otherScope(this.scope)}`;
+		const bottom = edge("╰", rawKeyHint(this.options.searchKey, action), "╯");
 		return [top, ...this.renderList().map(row), rule, ...this.query.render(inner).map(row), bottom];
 	}
 
 	invalidate(): void {}
 
-	/** Closing aborts loading and any matcher run; the aborted signal also marks the modal closed. */
+	/** Closing marks the modal closed and aborts loading and any matcher run. */
 	dispose(): void {
-		this.abort.abort();
+		this.closed = true;
+		this.load?.abort();
 		this.cancelSearch();
+	}
+
+	/**
+	 * Load the current scope's records, then bring the results in line with the query. Any earlier
+	 * load and search are cancelled and the list shows that it is loading, so records or results
+	 * from the previous scope are never shown, or confirmed, under this one.
+	 */
+	private loadHistory(): void {
+		this.load?.abort();
+		this.cancelSearch();
+		const load = new AbortController();
+		this.load = load;
+		this.history = { kind: "loading" };
+		this.results = { kind: "searching" };
+		this.options
+			.loadRecords(this.scope, load.signal)
+			.then(
+				(records): LoadState => ({ kind: "ready", records }),
+				(error: unknown): LoadState => ({ kind: "error", message: errorMessage(error) }),
+			)
+			.then((history) => {
+				if (load.signal.aborted) return;
+				this.history = history;
+				this.queryChanged(0);
+				this.options.tui.requestRender();
+			});
+		this.options.tui.requestRender();
 	}
 
 	private renderList(): string[] {
