@@ -22,7 +22,7 @@ function executable(name: string): string {
 }
 
 /** An isolated tmux server is both the controlling PTY and the terminal emulator. */
-export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk"; customEditor?: boolean; skill?: boolean }) {
+export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk"; customEditor?: boolean; skill?: boolean; holdHistoryRead?: boolean }) {
 	assert.ok(process.platform === "linux" || process.platform === "darwin", "PTY smoke suite requires Linux or macOS.");
 	const tmux = executable("tmux");
 	const matchers = { fzf: executable("fzf"), sk: executable("sk") };
@@ -68,8 +68,6 @@ export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk";
 		"--allow-child-process", "--allow-worker", "--allow-addons",
 	]; // No --allow-net: even an accidental request is denied before connecting.
 	const run = (command: string, args: string[]) => execFileSync(command, args, { env, cwd, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
-	const tmuxArgs = ["-u", "-S", join(root, "tmux.sock"), "-f", "/dev/null"];
-	const terminal = (...args: string[]) => run(tmux, [...tmuxArgs, ...args]);
 	const assertNoSubmissions = () => assert.equal(readFileSync(submissions, "utf8"), "", "recall must never submit a prompt");
 	for (const [name, path] of Object.entries(matchers)) t.diagnostic(`${name}: ${run(path, ["--version"]).trim()}`);
 	t.diagnostic(run(tmux, ["-V"]).trim());
@@ -83,7 +81,8 @@ export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk";
 	// ensure this cannot load user tmux hooks or affect an existing server.
 	const tmuxConfig = join(root, "tmux.conf");
 	writeFileSync(tmuxConfig, "set -g remain-on-exit on\nset -g status off\n");
-	tmuxArgs[tmuxArgs.length - 1] = tmuxConfig;
+	const tmuxArgs = ["-u", "-S", join(root, "tmux.sock"), "-f", tmuxConfig];
+	const terminal = (...args: string[]) => run(tmux, [...tmuxArgs, ...args]);
 	closeTerminal = async () => {
 		await delay(100); // also catch an accidental submission queued by the final key
 		try {
@@ -109,6 +108,7 @@ export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk";
 		"--model", "pty/smoke-alpha",
 		"-e", join(repo, "test/pty/guard.ts"),
 		...(options.customEditor ? ["-e", join(repo, "test/pty/marker-editor.ts")] : []),
+		...(options.holdHistoryRead ? ["-e", join(repo, "test/pty/held-history-read.ts")] : []),
 		"-e", join(repo, "src/index.ts"),
 		...(options.skill ? ["--skill", join(agent, "skills/pty-fixture/SKILL.md")] : []));
 	const screen = () => terminal("capture-pane", "-p", "-t", "smoke:0.0");
@@ -126,14 +126,8 @@ export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk";
 	}
 	await waitFor((value) => value.includes("PTY ready"));
 	return {
-		screen, waitFor, assertNoSubmissions,
-		async stays(predicate: (screen: string) => boolean): Promise<void> {
-			const deadline = Date.now() + 500;
-			do {
-				assert.ok(predicate(screen()), `Screen did not stay as expected:\n${screen()}`);
-				await delay(30);
-			} while (Date.now() < deadline);
-		},
+		screen, waitFor,
+		title: () => terminal("display-message", "-p", "-t", "smoke:0.0", "#{pane_title}").trim(),
 		cursor: () => terminal("display-message", "-p", "-t", "smoke:0.0", "#{cursor_x},#{cursor_y}").trim(),
 		key: (...keys: string[]) => { terminal("send-keys", "-t", "smoke:0.0", ...keys); },
 		text: (text: string) => { terminal("send-keys", "-t", "smoke:0.0", "-l", "--", text); },

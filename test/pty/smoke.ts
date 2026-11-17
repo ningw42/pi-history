@@ -11,7 +11,6 @@ for (const matcher of ["fzf", "sk"] as const) {
 		await pi.waitFor((screen) => !screen.includes("History ·") && screen.includes("newest prompt"));
 		pi.text("!");
 		await pi.waitFor((screen) => screen.includes("newest prompt!"));
-		pi.assertNoSubmissions();
 	});
 
 	test(`${matcher}: Ctrl+R searches the draft, toggles scope, and Escape preserves the cursor`, async (t) => {
@@ -37,16 +36,36 @@ for (const matcher of ["fzf", "sk"] as const) {
 		assert.ok(!pi.screen().includes("query-only"));
 	});
 
-	test(`${matcher}: /model opened immediately after launch stays open and usable`, async (t) => {
-		const pi = await launchPi(t, { matcher });
+	test(`${matcher}: /model survives startup and a dismissed history load completing`, async (t) => {
+		const pi = await launchPi(t, { matcher, holdHistoryRead: true });
 		pi.text("/model");
 		pi.key("Enter");
 		await pi.waitFor((screen) => screen.includes("Only showing models") && screen.includes("smoke-beta"));
 		pi.text("beta");
 		await pi.waitFor((screen) => screen.includes("> beta") && screen.includes("smoke-beta"));
-		await pi.stays((screen) => screen.includes("> beta") && screen.includes("Only showing models"));
 		pi.key("Enter");
 		await pi.waitFor((screen) => !screen.includes("Only showing models") && screen.includes("smoke-beta"));
+
+		// Production does no startup scan. Exercise the async-work hazard with a real modal
+		// load, dismissed while its fixture-file read is held, then reopen the real selector.
+		pi.key("Up");
+		await pi.waitFor((screen) => screen.includes("Loading history") && pi.title() === "PTY history read held");
+		pi.key("Escape");
+		await pi.waitFor((screen) => !screen.includes("History ·"));
+		pi.text("/model");
+		pi.key("Enter");
+		await pi.waitFor((screen) => screen.includes("Only showing models") && pi.title() === "PTY history read held");
+		pi.text("beta");
+		await pi.waitFor((screen) => screen.includes("> beta"));
+		pi.key("C-g"); // release the read through the test-only terminal listener
+		const completed = await pi.waitFor((screen) => screen.includes("PTY history read drained"));
+		assert.ok(completed.includes("Only showing models"), `history completion dismissed /model:\n${completed}`);
+		assert.ok(completed.includes("> beta"), `history completion changed the selector query:\n${completed}`);
+		pi.key("C-u");
+		pi.text("alpha");
+		await pi.waitFor((screen) => screen.includes("> alpha") && screen.includes("smoke-alpha"));
+		pi.key("Enter");
+		await pi.waitFor((screen) => !screen.includes("Only showing models") && screen.includes("smoke-alpha"));
 		pi.text("still editing");
 		await pi.waitFor((screen) => screen.includes("still editing"));
 	});
