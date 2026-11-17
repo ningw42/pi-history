@@ -44,3 +44,16 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
           fi
+
+  notify-pi-distribution:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Trigger pi-distribution Renovate
+        env:
+          GH_TOKEN: ${{ secrets.PI_DISTRIBUTION_WORKFLOW_PAT }}
+        run: |
+          gh workflow run renovate.yml \
+            --repo ningw42/pi-distribution \
+            --ref master
