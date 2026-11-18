@@ -1,6 +1,6 @@
 {
   "name": "pi-history",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "One history modal for Pi: Ctrl+R opens a Pi-drawn overlay of the prompts you typed before.",
   "type": "module",
