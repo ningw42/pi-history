@@ -2,7 +2,7 @@ export const LOCATION = "/abs/skills/code-review/SKILL.md";
 const BODY = "Review the diff carefully.\n\n## Steps\n1. Read every hunk.";
 
 /**
- * A skill invocation as Pi 1.5.2 stores it (`AgentSession._expandSkillCommand`): the skill block,
+ * A skill invocation as Pi stores it (`AgentSession._expandSkillCommand`): the skill block,
  * then, when arguments were typed, a blank line and the arguments. `baseDir` is the skill's base
  * directory, which Pi's own loader sets to the directory of its file.
  */

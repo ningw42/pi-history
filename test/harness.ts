@@ -361,7 +361,7 @@ export class Harness {
 	}
 
 	/**
-	 * Start a session the way Pi 1.5.2 does, at startup and again on `/new`, `/resume`, `/fork` and
+	 * Start a session the way Pi does, at startup and again on `/new`, `/resume`, `/fork` and
 	 * `/reload`: after startup, first emit `session_shutdown` to the outgoing extension, while its
 	 * session is intact; then reset the extension UI (dropping the installed editor factory; the
 	 * editor's text is carried over), switch the live session to `liveEntries` if given (as Pi's

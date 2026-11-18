@@ -10,13 +10,30 @@ permissions:
   contents: read
 
 jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      releases: ${{ steps.resolve.outputs.releases }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          releases=$(node scripts/ci-versions.mjs)
+          echo "releases=$releases" >> "$GITHUB_OUTPUT"
+
   test:
-    name: Node 26 / ${{ matrix.os }}
+    name: ${{ matrix.release.lane }} / ${{ matrix.os }}
+    needs: versions
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        release: ${{ fromJSON(needs.versions.outputs.releases) }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -25,51 +42,41 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      # The matcher adapter tests run the real fzf and sk and fail without them.
-      - name: Install fzf
-        shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            Linux) sudo apt-get update && sudo apt-get install -y fzf ;;
-            macOS) brew install fzf ;;
-            Windows) choco install fzf -y --no-progress ;;
-          esac
-          fzf --version
-      # Package managers ship skim releases years apart; use one pinned upstream release everywhere.
-      # The checksums are pinned here rather than read from the release being downloaded.
-      - name: Install sk
-        shell: bash
-        env:
-          SKIM_VERSION: v5.9.0
-        run: |
-          case "$RUNNER_OS-$RUNNER_ARCH" in
-            Linux-X64) asset=skim-x86_64-unknown-linux-musl.tar.xz sha256=de1ab4c6a0e53e3ed7850048ddd622b830b5aee2dc8ad8f0925f1fbf79e01eef ;;
-            macOS-ARM64) asset=skim-aarch64-apple-darwin.tar.xz sha256=9fe50c046ca23def3fb6b6d01cf60cc2c4aa24752936f5745899c61c324b6b26 ;;
-            Windows-X64) asset=skim-x86_64-pc-windows-msvc.zip sha256=12ffcb2568b070d3337aeb00c9eafb84fab63b76f00dc709ab9e0079ee1e1e27 ;;
-            *) echo "::error::no pinned skim build for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
-          esac
-          archive="$RUNNER_TEMP/$asset"
-          bin="$RUNNER_TEMP/skim"
-          curl -fsSL --retry 3 -o "$archive" "https://github.com/skim-rs/skim/releases/download/$SKIM_VERSION/$asset"
-          actual=$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(require("node:fs").readFileSync(process.argv[1])).digest("hex"))' "$archive")
-          if [ "$actual" != "$sha256" ]; then echo "::error::$asset has sha256 $actual, expected $sha256"; exit 1; fi
-          mkdir -p "$bin"
-          case "$asset" in
-            *.zip) 7z x -y -o"$bin" "$archive" sk.exe > /dev/null ;;
-            *) tar -xJf "$archive" -C "$bin" --strip-components=1 ;;
-          esac
-          if [ "$RUNNER_OS" = Windows ]; then cygpath -w "$bin" >> "$GITHUB_PATH"; else echo "$bin" >> "$GITHUB_PATH"; fi
-          "$bin/sk" --version
+      - name: Install release builds of both matchers
+        uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+        with:
+          tool_versions: |
+            fzf ${{ matrix.release.fzf }}
+            skim ${{ matrix.release.skim }}
+          add_shims_to_path: false
       - name: Install PTY host
         if: runner.os != 'Windows'
         shell: bash
         run: |
           case "$RUNNER_OS" in
-            Linux) sudo apt-get install -y tmux ;;
+            Linux) sudo apt-get update && sudo apt-get install -y tmux ;;
             macOS) brew install tmux ;;
           esac
           tmux -V
       - run: npm ci --ignore-scripts
+      - name: Select Pi release and verify the tools under test
+        shell: bash
+        env:
+          PI_AGENT: ${{ matrix.release.agent }}
+          PI_TUI: ${{ matrix.release.tui }}
+          FZF: ${{ matrix.release.fzf }}
+          SKIM: ${{ matrix.release.skim }}
+        run: |
+          npm install --no-save --ignore-scripts "@earendil-works/pi-coding-agent@$PI_AGENT" "@earendil-works/pi-tui@$PI_TUI"
+          npm ls --depth=0
+          node --input-type=commonjs <<'NODE'
+          const assert = require("node:assert/strict");
+          const run = name => require("node:child_process").execFileSync(name, ["--version"], { encoding: "utf8" }).trim();
+          for (const [name, expected] of [["pi-coding-agent", process.env.PI_AGENT], ["pi-tui", process.env.PI_TUI]])
+            assert.equal(require(`./node_modules/@earendil-works/${name}/package.json`).version, expected, name);
+          assert.equal(run("fzf").split(/\s+/)[0], process.env.FZF, "fzf on PATH");
+          assert.equal(run("sk").split(/\s+/)[1], process.env.SKIM, "sk on PATH");
+          NODE
       - run: npm run check
       - name: Real-Pi PTY smoke suite
         if: runner.os != 'Windows'
