@@ -21,7 +21,7 @@ describe("restoring a skill invocation", () => {
 			skillEnvelope({ args: `"naïve" café — 日本語 🚀 $1 $(whoami) \`id\`` }),
 			`/skill:code-review "naïve" café — 日本語 🚀 $1 $(whoami) \`id\``,
 		],
-		// Pi 1.5.2 writes the skill's base directory into the prologue. Its own loader sets that to the
+		// Pi writes the skill's base directory into the prologue. Its own loader sets that to the
 		// file's directory, but a skill supplied as an object (through the SDK) may have any, even none.
 		[
 			"a base directory other than the skill file's directory",

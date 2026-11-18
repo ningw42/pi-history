@@ -2,11 +2,11 @@
 
 Recall and search previous prompts in a [Pi](https://pi.dev) overlay. Your draft stays untouched until you confirm a prompt, and recalling never submits it.
 
-Targets **Pi 1.5.2** on Linux and macOS, in interactive (TUI) mode. Pi loads the TypeScript source directly; no build is needed.
+Runs in Pi’s interactive TUI on Linux and macOS. See [`peerDependencies` in package.json](./package.json) for the minimum supported Pi version. Pi loads the TypeScript source directly; no build is needed.
 
 ## Install
 
-Install [`fzf`](https://github.com/junegunn/fzf) on your `PATH`, or [`skim`](https://github.com/skim-rs/skim) (`sk`) and [configure](#configuration) it as the matcher. Then install the extension from Git:
+Install [`fzf`](https://github.com/junegunn/fzf) on your `PATH`, or [`skim`](https://github.com/skim-rs/skim) (`sk`) and [configure](#configuration) it as the matcher. You need only one for search; the minimum supported versions are in [`config.minimumMatcherVersions` in package.json](./package.json). Then install the extension from Git:
 
 ```sh
 pi install git:github.com/ningw42/pi-history
@@ -98,13 +98,13 @@ npm run test:pty               # real-Pi smoke tests; Linux/macOS, also needs tm
 
 Functional tests run concurrently; wall-clock performance checks run afterward, one file at a time. Run performance investigations on an otherwise idle machine. Tests use temporary history and configuration, not your real data. If the harness reports that its temporary directory is inside a Git repository, set `TMPDIR` to a directory outside one.
 
-The PTY suite uses the pinned Pi development dependency and isolated tmux servers. It needs no globally installed Pi or credentials and makes no model calls. To run every suite on Linux/macOS:
+The PTY suite uses the Pi CLI installed by `npm ci` and isolated tmux servers. It needs no globally installed Pi or credentials and makes no model calls. To run every suite on Linux/macOS:
 
 ```sh
 npm run check && npm run test:pty
 ```
 
-CI runs `npm run check` on Linux, macOS and Windows, plus the PTY suite on Linux/macOS. Windows coverage excludes some POSIX-only tests; the supported interactive platforms remain Linux/macOS.
+CI runs `npm run check` on Linux, macOS and Windows, plus the PTY suite on Linux/macOS. Each platform tests two sets of dependencies: the exact minimum versions of Pi, fzf and skim from `package.json`, and their latest stable releases resolved at run time. Windows coverage excludes some POSIX-only tests; the supported interactive platforms remain Linux/macOS.
 
 ### Optional Nix shell and hooks
 

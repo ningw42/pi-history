@@ -7,8 +7,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
-const cli = join(repo, "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
-const supportedVersion = "1.5.2";
+const cli = join(repo, "node_modules/.bin/pi");
 
 function executable(name: string): string {
 	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
@@ -41,7 +40,6 @@ export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk";
 	for (const path of [agent, cwd, sessions, join(root, "tmp")]) mkdirSync(path, { recursive: true });
 	writeFileSync(submissions, "");
 	writeFileSync(join(agent, "auth.json"), "{}");
-	writeFileSync(join(agent, "settings.json"), JSON.stringify({ quietStartup: true, lastChangelogVersion: supportedVersion }));
 	writeFileSync(join(agent, "pi-history.json"), JSON.stringify({ matcher: options.matcher, matcherCommand: matchers[options.matcher] }));
 	writeFileSync(join(sessions, "history.jsonl"), [
 		{ type: "session", version: 3, id: "fixture", timestamp: "2026-01-01T00:00:00Z", cwd },
@@ -74,7 +72,8 @@ export async function launchPi(t: TestContext, options: { matcher: "fzf" | "sk";
 	let version: string;
 	try { version = run(process.execPath, [...nodeArgs, cli, "--version"]).trim(); }
 	catch (error) { throw new Error("Pi CLI is missing or cannot run. Run npm ci --ignore-scripts.", { cause: error }); }
-	assert.equal(version, supportedVersion, `PTY smoke suite supports Pi ${supportedVersion}, got ${version}`);
+	t.diagnostic(`Pi: ${version}`);
+	writeFileSync(join(agent, "settings.json"), JSON.stringify({ quietStartup: true, lastChangelogVersion: version }));
 	if (options.skill) run(process.execPath, [...nodeArgs, join(repo, "test/pty/store-skill.ts")]);
 
 	// Keep a crashed CLI's final screen available for diagnostics. A private config and socket

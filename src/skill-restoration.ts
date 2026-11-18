@@ -11,7 +11,7 @@ const CLOSING_TAG_AT_LINE_START = `\n${CLOSING_TAG}`;
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 /**
- * The command a prompt was typed as, when it began with a skill invocation. Pi 1.5.2 stores
+ * The command a prompt was typed as, when it began with a skill invocation. Pi stores
  * `/skill:NAME ARGUMENTS` expanded into a skill envelope, followed by the arguments when there are
  * any (`AgentSession._expandSkillCommand`):
  *
